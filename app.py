@@ -8,11 +8,11 @@ from dotenv import load_dotenv
 import logging
 import sys
 import re
-import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 from functools import partial
+import time
 
 # Configure logging
 logging.basicConfig(
@@ -38,7 +38,39 @@ logger.info("DeepSeek client initialized")
 
 # Initialize DuckDB connection
 db_path = 'emails.db'
-conn = duckdb.connect(db_path)
+
+def get_db_connection():
+    """Get a database connection, creating a new one if needed"""
+    try:
+        # Check if connection exists and is valid
+        if 'conn' in st.session_state and st.session_state.conn is not None:
+            try:
+                # Test the connection
+                st.session_state.conn.execute("SELECT 1").fetchone()
+                return st.session_state.conn
+            except Exception:
+                # If test fails, close the connection
+                try:
+                    st.session_state.conn.close()
+                except:
+                    pass
+                st.session_state.conn = None
+        
+        # Create new connection
+        conn = duckdb.connect(db_path)
+        st.session_state.conn = conn
+        logger.info(f"New DuckDB connection established to {db_path}")
+        return conn
+    except Exception as e:
+        logger.error(f"Error connecting to database: {str(e)}")
+        return None
+
+# Initialize connection
+conn = get_db_connection()
+if not conn:
+    st.error("Failed to connect to database. Please check the logs for details.")
+    st.stop()
+
 logger.info(f"DuckDB connection established to {db_path}")
 
 # Create tables if they don't exist
@@ -454,64 +486,83 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
 def clear_emails_table():
     """Clear the emails table and all dependent tables"""
     try:
-        # Start a transaction
-        conn.execute("BEGIN TRANSACTION")
+        # Close current connection
+        if 'conn' in st.session_state and st.session_state.conn is not None:
+            try:
+                st.session_state.conn.close()
+            except:
+                pass
+            st.session_state.conn = None
         
-        # Drop and recreate tables in correct order
-        conn.execute('DROP TABLE IF EXISTS analysis_results')
-        conn.execute('DROP TABLE IF EXISTS query_cache')
-        conn.execute('DROP TABLE IF EXISTS email_embeddings')
-        conn.execute('DROP TABLE IF EXISTS emails')
+        # Wait a moment to ensure file is released
+        time.sleep(1)
         
-        # Recreate tables
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS emails (
-                id INTEGER PRIMARY KEY,
-                tenant_id INTEGER,
-                email_to VARCHAR,
-                email_from VARCHAR,
-                email_subject VARCHAR,
-                email_text_body TEXT,
-                email_html_body TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                analyzed_at TIMESTAMP DEFAULT NULL,
-                is_analyzed BOOLEAN DEFAULT FALSE
-            )
-        ''')
+        # Delete the database file to fully clear data and reduce file size
+        if os.path.exists(db_path):
+            try:
+                os.remove(db_path)
+                logger.info(f"Deleted database file {db_path}")
+            except Exception as e:
+                logger.error(f"Error deleting database file: {str(e)}")
+                return False
         
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS analysis_results (
-                id INTEGER PRIMARY KEY,
-                email_id INTEGER,
-                process_mistakes TEXT,
-                failure_patterns TEXT,
-                common_themes TEXT,
-                analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (email_id) REFERENCES emails(id)
-            )
-        ''')
+        # Wait another moment to ensure file system operations are complete
+        time.sleep(1)
         
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS query_cache (
-                id INTEGER PRIMARY KEY,
-                query_text TEXT,
-                response_text TEXT,
-                context_size INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                access_count INTEGER DEFAULT 0
-            )
-        ''')
-        
-        # Commit the transaction
-        conn.execute("COMMIT")
-        
-        logger.info("All tables cleared and recreated successfully")
-        return True
+        # Create new connection and initialize schema
+        try:
+            conn = duckdb.connect(db_path)
+            st.session_state.conn = conn
+            
+            # Create tables
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS emails (
+                    id INTEGER PRIMARY KEY,
+                    tenant_id INTEGER,
+                    email_to VARCHAR,
+                    email_from VARCHAR,
+                    email_subject VARCHAR,
+                    email_text_body TEXT,
+                    email_html_body TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    analyzed_at TIMESTAMP DEFAULT NULL,
+                    is_analyzed BOOLEAN DEFAULT FALSE
+                )
+            ''')
+
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS analysis_results (
+                    id INTEGER PRIMARY KEY,
+                    email_id INTEGER,
+                    process_mistakes TEXT,
+                    failure_patterns TEXT,
+                    common_themes TEXT,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (email_id) REFERENCES emails(id)
+                )
+            ''')
+
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS query_cache (
+                    id INTEGER PRIMARY KEY,
+                    query_text TEXT,
+                    response_text TEXT,
+                    context_size INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    access_count INTEGER DEFAULT 0
+                )
+            ''')
+            
+            logger.info("Database cleared and schema reinitialized successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error reinitializing database: {str(e)}")
+            return False
+            
     except Exception as e:
-        # Rollback on error
-        conn.execute("ROLLBACK")
-        logger.error(f"Error clearing tables: {str(e)}")
+        logger.error(f"Error clearing database: {str(e)}")
         return False
 
 def get_email_context(limit=50):
@@ -580,36 +631,6 @@ def query_llm_with_context(query_text, context):
     except Exception as e:
         logger.error(f"Error querying LLM: {str(e)}")
         return f"Error generating response: {str(e)}"
-
-def get_text_embedding(text):
-    """Get embedding for text using OpenAI's embedding model"""
-    try:
-        response = client.embeddings.create(
-            model="deepseek-chat",  # Using the chat model instead of coder
-            input=text
-        )
-        return response.data[0].embedding
-    except Exception as e:
-        logger.error(f"Error getting embedding: {str(e)}")
-        # Return a zero vector as fallback
-        return np.zeros(1536)  # Standard embedding size
-
-def store_embedding(email_id, text):
-    """Store email embedding in database"""
-    try:
-        embedding = get_text_embedding(text)
-        if embedding is not None:
-            # Convert embedding to bytes for storage
-            embedding_bytes = np.array(embedding).tobytes()
-            conn.execute('''
-                INSERT INTO email_embeddings (email_id, embedding)
-                VALUES (?, ?)
-            ''', (email_id, embedding_bytes))
-            logger.info(f"Stored embedding for email {email_id}")
-            return True
-    except Exception as e:
-        logger.error(f"Error storing embedding: {str(e)}")
-    return False
 
 def get_cached_query(query_text, context_size):
     """Get cached query result if available"""
@@ -701,6 +722,37 @@ def get_similar_emails(query_text, limit=5):
     except Exception as e:
         logger.error(f"Error finding similar emails: {str(e)}")
         return []
+
+def get_db_size():
+    """Get the current size of the database file"""
+    try:
+        if os.path.exists(db_path):
+            # Force a flush and checkpoint of any pending writes
+            if 'conn' in st.session_state and st.session_state.conn is not None:
+                try:
+                    # Force checkpoint and close all connections
+                    st.session_state.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    st.session_state.conn.execute("PRAGMA optimize")
+                    st.session_state.conn.close()
+                    st.session_state.conn = None
+                except:
+                    pass
+            
+            # Small delay to ensure file handles are released
+            time.sleep(0.1)
+            
+            # Get the file size
+            size_bytes = os.path.getsize(db_path)
+            
+            # Reconnect after getting size
+            conn = duckdb.connect(db_path)
+            st.session_state.conn = conn
+            
+            return size_bytes
+        return 0
+    except Exception as e:
+        logger.error(f"Error getting database size: {str(e)}")
+        return 0
 
 # Streamlit UI
 st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
@@ -861,11 +913,68 @@ st.markdown("### 📈 Dashboard Status")
 status_col1, status_col2, status_col3 = st.columns(3)
 
 with status_col1:
-    count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-    st.metric("Total Emails", count)
+    try:
+        # Ensure we have a valid connection
+        conn = get_db_connection()
+        if conn:
+            try:
+                count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
+                st.metric("Total Emails", count)
+            except Exception as e:
+                if "Table with name emails does not exist" in str(e):
+                    st.metric("Total Emails", "0")
+                else:
+                    logger.error(f"Error getting email count: {str(e)}")
+                    st.metric("Total Emails", "Error")
+        else:
+            st.metric("Total Emails", "Error")
+    except Exception as e:
+        logger.error(f"Error getting email count: {str(e)}")
+        st.metric("Total Emails", "Error")
 
 with status_col2:
     st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
 
 with status_col3:
-    st.metric("Database Size", f"{os.path.getsize(db_path) / 1024:.1f} KB")
+    if st.button('📋 Show Table'):
+        try:
+            # Get all emails with their analysis status
+            query = '''
+                SELECT 
+                    e.id,
+                    e.email_subject,
+                    e.email_from,
+                    e.email_to,
+                    e.created_at,
+                    e.is_analyzed,
+                    e.analyzed_at
+                FROM emails e
+                ORDER BY e.created_at DESC
+            '''
+            emails = conn.execute(query).fetchdf()
+            
+            if not emails.empty:
+                # Format the dataframe for display
+                emails['created_at'] = emails['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                emails['analyzed_at'] = emails['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                emails['is_analyzed'] = emails['is_analyzed'].map({True: '✅', False: '❌'})
+                
+                # Rename columns for better display
+                emails = emails.rename(columns={
+                    'id': 'ID',
+                    'email_subject': 'Subject',
+                    'email_from': 'From',
+                    'email_to': 'To',
+                    'created_at': 'Created',
+                    'is_analyzed': 'Analyzed',
+                    'analyzed_at': 'Analyzed At'
+                })
+                
+                # Display the table
+                st.dataframe(emails, use_container_width=True)
+            else:
+                st.info("No emails found in the database.")
+        except Exception as e:
+            logger.error(f"Error displaying table: {str(e)}")
+            st.error("Error displaying table. Please check the logs for details.")
+

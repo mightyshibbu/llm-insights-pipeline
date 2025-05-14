@@ -1255,3 +1255,737 @@ Did you mean: "force_compression"
 2025-05-14 15:16:56,832 - INFO - DeepSeek client initialized
 2025-05-14 15:16:56,833 - INFO - DuckDB connection established to emails.db
 2025-05-14 15:16:56,842 - INFO - Database schema initialized
+2025-05-14 15:35:20,915 - INFO - Environment variables loaded
+2025-05-14 15:35:21,153 - INFO - DeepSeek client initialized
+2025-05-14 15:35:21,164 - INFO - DuckDB connection established to emails.db
+2025-05-14 15:35:21,172 - INFO - Database schema initialized
+2025-05-14 15:35:24,830 - INFO - Environment variables loaded
+2025-05-14 15:35:25,623 - INFO - DeepSeek client initialized
+2025-05-14 15:35:25,625 - INFO - DuckDB connection established to emails.db
+2025-05-14 15:35:25,635 - INFO - Database schema initialized
+2025-05-14 15:35:25,684 - INFO - All tables cleared and recreated successfully
+2025-05-14 15:35:25,824 - INFO - Environment variables loaded
+2025-05-14 15:35:26,607 - INFO - DeepSeek client initialized
+2025-05-14 15:35:26,608 - INFO - DuckDB connection established to emails.db
+2025-05-14 15:35:26,615 - INFO - Database schema initialized
+2025-05-14 15:39:47,143 - INFO - Environment variables loaded
+2025-05-14 15:39:47,427 - INFO - DeepSeek client initialized
+2025-05-14 15:39:47,442 - INFO - DuckDB connection established to emails.db
+2025-05-14 15:39:47,451 - INFO - Database schema initialized
+2025-05-14 15:47:54,690 - INFO - Environment variables loaded
+2025-05-14 15:47:54,921 - INFO - DeepSeek client initialized
+2025-05-14 15:48:08,563 - INFO - Environment variables loaded
+2025-05-14 15:48:08,772 - INFO - DeepSeek client initialized
+2025-05-14 15:48:08,879 - INFO - DuckDB connection established to emails.db
+2025-05-14 15:48:08,885 - INFO - Database schema initialized
+2025-05-14 16:24:43,110 - INFO - Environment variables loaded
+2025-05-14 16:24:43,342 - INFO - DeepSeek client initialized
+2025-05-14 16:24:43,454 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:24:43,457 - INFO - Database schema initialized
+2025-05-14 16:24:47,119 - INFO - Environment variables loaded
+2025-05-14 16:24:47,742 - INFO - DeepSeek client initialized
+2025-05-14 16:24:47,743 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:24:47,748 - INFO - Database schema initialized
+2025-05-14 16:24:47,764 - ERROR - Error clearing database: [WinError 32] The process cannot access the file because it is being used by another process: 'emails.db'
+2025-05-14 16:25:28,766 - INFO - Environment variables loaded
+2025-05-14 16:25:29,079 - INFO - DeepSeek client initialized
+2025-05-14 16:25:29,096 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:25:29,105 - INFO - Database schema initialized
+2025-05-14 16:25:32,268 - INFO - Environment variables loaded
+2025-05-14 16:25:32,781 - INFO - DeepSeek client initialized
+2025-05-14 16:25:32,781 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:25:32,787 - INFO - Database schema initialized
+2025-05-14 16:25:32,800 - ERROR - Error clearing database: [WinError 32] The process cannot access the file because it is being used by another process: 'emails.db'
+2025-05-14 16:25:32,806 - ERROR - Error getting email count: Connection Error: Connection already closed!
+2025-05-14 16:26:22,406 - INFO - Environment variables loaded
+2025-05-14 16:26:22,632 - INFO - DeepSeek client initialized
+2025-05-14 16:26:22,643 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:26:22,643 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:26:22,649 - INFO - Database schema initialized
+2025-05-14 16:26:25,384 - INFO - Environment variables loaded
+2025-05-14 16:26:25,923 - INFO - DeepSeek client initialized
+2025-05-14 16:26:25,924 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:26:25,930 - INFO - Database schema initialized
+2025-05-14 16:26:26,953 - INFO - Deleted database file emails.db
+2025-05-14 16:26:26,971 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:26:26,973 - ERROR - Error initializing database schema: Connection Error: Connection already closed!
+2025-05-14 16:26:26,973 - ERROR - Failed to reinitialize database after clearing
+2025-05-14 16:26:27,028 - ERROR - Error getting email count: Catalog Error: Table with name emails does not exist!
+Did you mean "pg_tables"?
+
+LINE 1: SELECT COUNT(*) FROM emails
+                             ^
+2025-05-14 16:27:45,058 - INFO - Environment variables loaded
+2025-05-14 16:27:45,312 - INFO - DeepSeek client initialized
+2025-05-14 16:27:45,323 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:27:45,323 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:27:45,330 - INFO - Database schema initialized
+2025-05-14 16:27:47,357 - INFO - Environment variables loaded
+2025-05-14 16:27:47,592 - INFO - DeepSeek client initialized
+2025-05-14 16:27:47,593 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:27:47,596 - INFO - Database schema initialized
+2025-05-14 16:27:48,608 - INFO - Deleted database file emails.db
+2025-05-14 16:27:49,634 - INFO - Database cleared and schema reinitialized successfully
+2025-05-14 16:27:49,732 - INFO - Environment variables loaded
+2025-05-14 16:27:50,381 - INFO - DeepSeek client initialized
+2025-05-14 16:27:50,382 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:27:50,386 - INFO - Database schema initialized
+2025-05-14 16:27:58,355 - INFO - Environment variables loaded
+2025-05-14 16:27:58,418 - INFO - Environment variables loaded
+2025-05-14 16:27:58,972 - INFO - DeepSeek client initialized
+2025-05-14 16:27:59,060 - INFO - DeepSeek client initialized
+2025-05-14 16:27:59,063 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:27:59,068 - INFO - Database schema initialized
+2025-05-14 16:27:59,084 - INFO - Starting batch import of 50 emails
+2025-05-14 16:27:59,093 - INFO - Stored email 1 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,100 - INFO - Stored email 2 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,106 - INFO - Stored email 3 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,112 - INFO - Stored email 4 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:27:59,118 - INFO - Stored email 5 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,124 - INFO - Stored email 6 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,131 - INFO - Stored email 7 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,136 - INFO - Stored email 8 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:27:59,143 - INFO - Stored email 9 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,149 - INFO - Stored email 10 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,154 - INFO - Stored email 11 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,160 - INFO - Stored email 12 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:27:59,164 - INFO - Stored email 13 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,168 - INFO - Stored email 14 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,174 - INFO - Stored email 15 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,178 - INFO - Stored email 16 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,183 - INFO - Stored email 17 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:27:59,188 - INFO - Stored email 18 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,192 - INFO - Stored email 19 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:27:59,196 - INFO - Stored email 20 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,202 - INFO - Stored email 21 from engineer@company.com to maintenance@company.com
+2025-05-14 16:27:59,207 - INFO - Stored email 22 from engineer@company.com to maintenance@company.com
+2025-05-14 16:27:59,211 - INFO - Stored email 23 from engineer@company.com to maintenance@company.com
+2025-05-14 16:27:59,215 - INFO - Stored email 24 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,220 - INFO - Stored email 25 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:27:59,225 - INFO - Stored email 26 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:27:59,229 - INFO - Stored email 27 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:27:59,235 - INFO - Stored email 28 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,240 - INFO - Stored email 29 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,244 - INFO - Stored email 30 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,249 - INFO - Stored email 31 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,253 - INFO - Stored email 32 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,257 - INFO - Stored email 33 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,261 - INFO - Stored email 34 from engineer@company.com to maintenance@company.com
+2025-05-14 16:27:59,265 - INFO - Stored email 35 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,268 - INFO - Stored email 36 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,272 - INFO - Stored email 37 from engineer@company.com to maintenance@company.com
+2025-05-14 16:27:59,275 - INFO - Stored email 38 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:27:59,279 - INFO - Stored email 39 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,283 - INFO - Stored email 40 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,287 - INFO - Stored email 41 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,290 - INFO - Stored email 42 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:27:59,293 - INFO - Stored email 43 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:27:59,298 - INFO - Stored email 44 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,302 - INFO - Stored email 45 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,306 - INFO - Stored email 46 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:27:59,309 - INFO - Stored email 47 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,313 - INFO - Stored email 48 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:27:59,317 - INFO - Stored email 49 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:27:59,322 - INFO - Stored email 50 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:27:59,325 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 16:28:02,455 - INFO - Environment variables loaded
+2025-05-14 16:28:03,005 - INFO - DeepSeek client initialized
+2025-05-14 16:28:03,006 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:28:03,007 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:28:03,012 - INFO - Database schema initialized
+2025-05-14 16:28:10,501 - INFO - Environment variables loaded
+2025-05-14 16:28:11,119 - INFO - DeepSeek client initialized
+2025-05-14 16:28:11,122 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:28:11,126 - INFO - Database schema initialized
+2025-05-14 16:28:11,136 - INFO - Starting insights generation
+2025-05-14 16:28:11,144 - INFO - Found 50 emails to analyze
+2025-05-14 16:28:11,144 - INFO - Date range of emails: 2025-05-14 to 2025-05-14
+2025-05-14 16:28:11,148 - INFO - Processing batch 1 of 5
+2025-05-14 16:28:11,149 - INFO - Processing batch 2 of 5
+2025-05-14 16:28:11,151 - INFO - Processing batch 3 of 5
+2025-05-14 16:28:11,865 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:11,921 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:12,071 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:29,612 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:30,195 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:33,332 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:48,802 - INFO - Stored analysis results for email 21
+2025-05-14 16:28:48,808 - INFO - Stored analysis results for email 22
+2025-05-14 16:28:48,818 - INFO - Stored analysis results for email 23
+2025-05-14 16:28:48,827 - INFO - Stored analysis results for email 24
+2025-05-14 16:28:48,835 - INFO - Stored analysis results for email 25
+2025-05-14 16:28:48,844 - INFO - Stored analysis results for email 26
+2025-05-14 16:28:48,855 - INFO - Stored analysis results for email 27
+2025-05-14 16:28:48,863 - INFO - Stored analysis results for email 28
+2025-05-14 16:28:48,873 - INFO - Stored analysis results for email 29
+2025-05-14 16:28:48,882 - INFO - Stored analysis results for email 30
+2025-05-14 16:28:48,883 - INFO - Processing batch 4 of 5
+2025-05-14 16:28:49,093 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:49,406 - INFO - Stored analysis results for email 1
+2025-05-14 16:28:49,412 - INFO - Stored analysis results for email 2
+2025-05-14 16:28:49,416 - INFO - Stored analysis results for email 3
+2025-05-14 16:28:49,422 - INFO - Stored analysis results for email 4
+2025-05-14 16:28:49,427 - INFO - Stored analysis results for email 5
+2025-05-14 16:28:49,432 - INFO - Stored analysis results for email 6
+2025-05-14 16:28:49,437 - INFO - Stored analysis results for email 7
+2025-05-14 16:28:49,444 - INFO - Stored analysis results for email 8
+2025-05-14 16:28:49,450 - INFO - Stored analysis results for email 9
+2025-05-14 16:28:49,455 - INFO - Stored analysis results for email 10
+2025-05-14 16:28:49,456 - INFO - Processing batch 5 of 5
+2025-05-14 16:28:49,677 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:28:51,982 - INFO - Stored analysis results for email 11
+2025-05-14 16:28:51,990 - INFO - Stored analysis results for email 12
+2025-05-14 16:28:51,997 - INFO - Stored analysis results for email 13
+2025-05-14 16:28:52,006 - INFO - Stored analysis results for email 14
+2025-05-14 16:28:52,014 - INFO - Stored analysis results for email 15
+2025-05-14 16:28:52,025 - INFO - Stored analysis results for email 16
+2025-05-14 16:28:52,034 - INFO - Stored analysis results for email 17
+2025-05-14 16:28:52,042 - INFO - Stored analysis results for email 18
+2025-05-14 16:28:52,050 - INFO - Stored analysis results for email 19
+2025-05-14 16:28:52,059 - INFO - Stored analysis results for email 20
+2025-05-14 16:29:07,760 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:29:08,427 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:29:27,469 - INFO - Stored analysis results for email 41
+2025-05-14 16:29:27,477 - INFO - Stored analysis results for email 42
+2025-05-14 16:29:27,485 - INFO - Stored analysis results for email 43
+2025-05-14 16:29:27,493 - INFO - Stored analysis results for email 44
+2025-05-14 16:29:27,502 - INFO - Stored analysis results for email 45
+2025-05-14 16:29:27,510 - INFO - Stored analysis results for email 46
+2025-05-14 16:29:27,518 - INFO - Stored analysis results for email 47
+2025-05-14 16:29:27,524 - INFO - Stored analysis results for email 48
+2025-05-14 16:29:27,530 - INFO - Stored analysis results for email 49
+2025-05-14 16:29:27,539 - INFO - Stored analysis results for email 50
+2025-05-14 16:29:27,606 - INFO - Stored analysis results for email 31
+2025-05-14 16:29:27,614 - INFO - Stored analysis results for email 32
+2025-05-14 16:29:27,620 - INFO - Stored analysis results for email 33
+2025-05-14 16:29:27,628 - INFO - Stored analysis results for email 34
+2025-05-14 16:29:27,636 - INFO - Stored analysis results for email 35
+2025-05-14 16:29:27,643 - INFO - Stored analysis results for email 36
+2025-05-14 16:29:27,651 - INFO - Stored analysis results for email 37
+2025-05-14 16:29:27,658 - INFO - Stored analysis results for email 38
+2025-05-14 16:29:27,666 - INFO - Stored analysis results for email 39
+2025-05-14 16:29:27,675 - INFO - Stored analysis results for email 40
+2025-05-14 16:29:27,683 - INFO - Analysis complete. Stats: {'total_emails': 50, 'analyzed_emails': 50, 'referenced_emails': 47, 'date_range': '2025-05-14 to 2025-05-14', 'batches_processed': 5, 'batching_method': 'chronological'}
+2025-05-14 16:29:27,685 - INFO - Insights updated in session state
+2025-05-14 16:30:32,144 - INFO - Environment variables loaded
+2025-05-14 16:30:32,401 - INFO - DeepSeek client initialized
+2025-05-14 16:30:32,413 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:30:32,413 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:32,431 - INFO - Database schema initialized
+2025-05-14 16:30:35,357 - INFO - Environment variables loaded
+2025-05-14 16:30:35,593 - INFO - DeepSeek client initialized
+2025-05-14 16:30:35,594 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:35,611 - INFO - Database schema initialized
+2025-05-14 16:30:35,686 - INFO - Environment variables loaded
+2025-05-14 16:30:35,909 - INFO - DeepSeek client initialized
+2025-05-14 16:30:35,910 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:35,927 - INFO - Database schema initialized
+2025-05-14 16:30:37,492 - INFO - Environment variables loaded
+2025-05-14 16:30:37,846 - INFO - DeepSeek client initialized
+2025-05-14 16:30:37,847 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:37,864 - INFO - Database schema initialized
+2025-05-14 16:30:37,966 - INFO - Environment variables loaded
+2025-05-14 16:30:38,193 - INFO - DeepSeek client initialized
+2025-05-14 16:30:38,194 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:38,213 - INFO - Database schema initialized
+2025-05-14 16:30:40,776 - INFO - Environment variables loaded
+2025-05-14 16:30:41,009 - INFO - DeepSeek client initialized
+2025-05-14 16:30:41,010 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:41,029 - INFO - Database schema initialized
+2025-05-14 16:30:42,056 - INFO - Deleted database file emails.db
+2025-05-14 16:30:43,086 - INFO - Database cleared and schema reinitialized successfully
+2025-05-14 16:30:43,164 - INFO - Environment variables loaded
+2025-05-14 16:30:43,414 - INFO - DeepSeek client initialized
+2025-05-14 16:30:43,415 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:43,434 - INFO - Database schema initialized
+2025-05-14 16:30:44,804 - INFO - Environment variables loaded
+2025-05-14 16:30:45,071 - INFO - DeepSeek client initialized
+2025-05-14 16:30:45,072 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:45,091 - INFO - Database schema initialized
+2025-05-14 16:30:45,190 - INFO - Environment variables loaded
+2025-05-14 16:30:45,412 - INFO - DeepSeek client initialized
+2025-05-14 16:30:45,413 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:45,434 - INFO - Database schema initialized
+2025-05-14 16:30:50,595 - INFO - Environment variables loaded
+2025-05-14 16:30:50,637 - INFO - Environment variables loaded
+2025-05-14 16:30:50,938 - INFO - DeepSeek client initialized
+2025-05-14 16:30:51,008 - INFO - DeepSeek client initialized
+2025-05-14 16:30:51,009 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:51,030 - INFO - Database schema initialized
+2025-05-14 16:30:51,043 - INFO - Starting batch import of 50 emails
+2025-05-14 16:30:51,048 - INFO - Stored email 1 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,051 - INFO - Stored email 2 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,052 - INFO - Stored email 3 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,053 - INFO - Stored email 4 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:30:51,055 - INFO - Stored email 5 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,058 - INFO - Stored email 6 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,061 - INFO - Stored email 7 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,064 - INFO - Stored email 8 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:30:51,067 - INFO - Stored email 9 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,069 - INFO - Stored email 10 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,072 - INFO - Stored email 11 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,073 - INFO - Stored email 12 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:30:51,075 - INFO - Stored email 13 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,077 - INFO - Stored email 14 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,080 - INFO - Stored email 15 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,082 - INFO - Stored email 16 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,084 - INFO - Stored email 17 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:30:51,086 - INFO - Stored email 18 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,089 - INFO - Stored email 19 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:30:51,091 - INFO - Stored email 20 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,092 - INFO - Stored email 21 from engineer@company.com to maintenance@company.com
+2025-05-14 16:30:51,094 - INFO - Stored email 22 from engineer@company.com to maintenance@company.com
+2025-05-14 16:30:51,097 - INFO - Stored email 23 from engineer@company.com to maintenance@company.com
+2025-05-14 16:30:51,098 - INFO - Stored email 24 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,100 - INFO - Stored email 25 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:30:51,103 - INFO - Stored email 26 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:30:51,105 - INFO - Stored email 27 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:30:51,107 - INFO - Stored email 28 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,109 - INFO - Stored email 29 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,112 - INFO - Stored email 30 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,113 - INFO - Stored email 31 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,115 - INFO - Stored email 32 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,117 - INFO - Stored email 33 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,118 - INFO - Stored email 34 from engineer@company.com to maintenance@company.com
+2025-05-14 16:30:51,120 - INFO - Stored email 35 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,122 - INFO - Stored email 36 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,124 - INFO - Stored email 37 from engineer@company.com to maintenance@company.com
+2025-05-14 16:30:51,125 - INFO - Stored email 38 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:30:51,127 - INFO - Stored email 39 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,128 - INFO - Stored email 40 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,130 - INFO - Stored email 41 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,131 - INFO - Stored email 42 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:30:51,134 - INFO - Stored email 43 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:30:51,136 - INFO - Stored email 44 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,138 - INFO - Stored email 45 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,140 - INFO - Stored email 46 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:30:51,142 - INFO - Stored email 47 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,144 - INFO - Stored email 48 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:30:51,146 - INFO - Stored email 49 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:30:51,148 - INFO - Stored email 50 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:30:51,153 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 16:30:53,927 - INFO - Environment variables loaded
+2025-05-14 16:30:54,154 - INFO - DeepSeek client initialized
+2025-05-14 16:30:54,155 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:54,174 - INFO - Database schema initialized
+2025-05-14 16:30:54,244 - INFO - Environment variables loaded
+2025-05-14 16:30:54,453 - INFO - DeepSeek client initialized
+2025-05-14 16:30:54,454 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:54,459 - INFO - Database schema initialized
+2025-05-14 16:30:55,975 - INFO - Environment variables loaded
+2025-05-14 16:30:56,212 - INFO - DeepSeek client initialized
+2025-05-14 16:30:56,213 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:56,217 - INFO - Database schema initialized
+2025-05-14 16:30:56,287 - INFO - Environment variables loaded
+2025-05-14 16:30:56,498 - INFO - DeepSeek client initialized
+2025-05-14 16:30:56,499 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:30:56,520 - INFO - Database schema initialized
+2025-05-14 16:31:00,170 - INFO - Environment variables loaded
+2025-05-14 16:31:00,412 - INFO - DeepSeek client initialized
+2025-05-14 16:31:00,413 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:31:00,421 - INFO - Database schema initialized
+2025-05-14 16:31:00,426 - INFO - Starting insights generation
+2025-05-14 16:31:00,431 - INFO - Found 50 emails to analyze
+2025-05-14 16:31:00,431 - INFO - Date range of emails: 2025-05-14 to 2025-05-14
+2025-05-14 16:31:00,433 - INFO - Processing batch 1 of 5
+2025-05-14 16:31:00,434 - INFO - Processing batch 2 of 5
+2025-05-14 16:31:00,435 - INFO - Processing batch 3 of 5
+2025-05-14 16:31:00,902 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:00,915 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:00,924 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:19,303 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:20,870 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:21,069 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:36,100 - INFO - Stored analysis results for email 11
+2025-05-14 16:31:36,103 - INFO - Stored analysis results for email 12
+2025-05-14 16:31:36,106 - INFO - Stored analysis results for email 13
+2025-05-14 16:31:36,110 - INFO - Stored analysis results for email 14
+2025-05-14 16:31:36,113 - INFO - Stored analysis results for email 15
+2025-05-14 16:31:36,118 - INFO - Stored analysis results for email 16
+2025-05-14 16:31:36,121 - INFO - Stored analysis results for email 17
+2025-05-14 16:31:36,124 - INFO - Stored analysis results for email 18
+2025-05-14 16:31:36,127 - INFO - Stored analysis results for email 19
+2025-05-14 16:31:36,130 - INFO - Stored analysis results for email 20
+2025-05-14 16:31:36,130 - INFO - Processing batch 4 of 5
+2025-05-14 16:31:36,323 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:38,643 - INFO - Stored analysis results for email 1
+2025-05-14 16:31:38,647 - INFO - Stored analysis results for email 2
+2025-05-14 16:31:38,650 - INFO - Stored analysis results for email 3
+2025-05-14 16:31:38,652 - INFO - Stored analysis results for email 4
+2025-05-14 16:31:38,656 - INFO - Stored analysis results for email 5
+2025-05-14 16:31:38,658 - INFO - Stored analysis results for email 6
+2025-05-14 16:31:38,661 - INFO - Stored analysis results for email 7
+2025-05-14 16:31:38,664 - INFO - Stored analysis results for email 8
+2025-05-14 16:31:38,667 - INFO - Stored analysis results for email 9
+2025-05-14 16:31:38,672 - INFO - Stored analysis results for email 10
+2025-05-14 16:31:38,673 - INFO - Processing batch 5 of 5
+2025-05-14 16:31:38,849 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:39,848 - INFO - Stored analysis results for email 21
+2025-05-14 16:31:39,852 - INFO - Stored analysis results for email 22
+2025-05-14 16:31:39,855 - INFO - Stored analysis results for email 23
+2025-05-14 16:31:39,857 - INFO - Stored analysis results for email 24
+2025-05-14 16:31:39,860 - INFO - Stored analysis results for email 25
+2025-05-14 16:31:39,863 - INFO - Stored analysis results for email 26
+2025-05-14 16:31:39,866 - INFO - Stored analysis results for email 27
+2025-05-14 16:31:39,874 - INFO - Stored analysis results for email 28
+2025-05-14 16:31:39,879 - INFO - Stored analysis results for email 29
+2025-05-14 16:31:39,882 - INFO - Stored analysis results for email 30
+2025-05-14 16:31:57,369 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:31:58,570 - INFO - HTTP Request: POST https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"
+2025-05-14 16:32:15,336 - INFO - Stored analysis results for email 31
+2025-05-14 16:32:15,341 - INFO - Stored analysis results for email 32
+2025-05-14 16:32:15,344 - INFO - Stored analysis results for email 33
+2025-05-14 16:32:15,348 - INFO - Stored analysis results for email 34
+2025-05-14 16:32:15,350 - INFO - Stored analysis results for email 35
+2025-05-14 16:32:15,353 - INFO - Stored analysis results for email 36
+2025-05-14 16:32:15,358 - INFO - Stored analysis results for email 37
+2025-05-14 16:32:15,362 - INFO - Stored analysis results for email 38
+2025-05-14 16:32:15,365 - INFO - Stored analysis results for email 39
+2025-05-14 16:32:15,367 - INFO - Stored analysis results for email 40
+2025-05-14 16:32:19,044 - INFO - Stored analysis results for email 41
+2025-05-14 16:32:19,052 - INFO - Stored analysis results for email 42
+2025-05-14 16:32:19,056 - INFO - Stored analysis results for email 43
+2025-05-14 16:32:19,059 - INFO - Stored analysis results for email 44
+2025-05-14 16:32:19,062 - INFO - Stored analysis results for email 45
+2025-05-14 16:32:19,066 - INFO - Stored analysis results for email 46
+2025-05-14 16:32:19,070 - INFO - Stored analysis results for email 47
+2025-05-14 16:32:19,073 - INFO - Stored analysis results for email 48
+2025-05-14 16:32:19,078 - INFO - Stored analysis results for email 49
+2025-05-14 16:32:19,082 - INFO - Stored analysis results for email 50
+2025-05-14 16:32:19,086 - INFO - Analysis complete. Stats: {'total_emails': 50, 'analyzed_emails': 50, 'referenced_emails': 48, 'date_range': '2025-05-14 to 2025-05-14', 'batches_processed': 5, 'batching_method': 'chronological'}
+2025-05-14 16:32:19,087 - INFO - Insights updated in session state
+2025-05-14 16:32:23,125 - INFO - Environment variables loaded
+2025-05-14 16:32:23,345 - INFO - DeepSeek client initialized
+2025-05-14 16:32:23,346 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:32:23,366 - INFO - Database schema initialized
+2025-05-14 16:32:23,441 - INFO - Environment variables loaded
+2025-05-14 16:32:23,663 - INFO - DeepSeek client initialized
+2025-05-14 16:32:23,664 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:32:23,684 - INFO - Database schema initialized
+2025-05-14 16:32:24,968 - INFO - Environment variables loaded
+2025-05-14 16:32:25,107 - INFO - Environment variables loaded
+2025-05-14 16:32:25,232 - INFO - DeepSeek client initialized
+2025-05-14 16:32:25,305 - INFO - Environment variables loaded
+2025-05-14 16:32:25,382 - INFO - DeepSeek client initialized
+2025-05-14 16:32:25,489 - INFO - Environment variables loaded
+2025-05-14 16:32:25,570 - INFO - DeepSeek client initialized
+2025-05-14 16:32:25,736 - INFO - DeepSeek client initialized
+2025-05-14 16:32:25,737 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:32:25,756 - INFO - Database schema initialized
+2025-05-14 16:32:25,847 - INFO - Environment variables loaded
+2025-05-14 16:32:26,073 - INFO - DeepSeek client initialized
+2025-05-14 16:32:26,074 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:32:26,094 - INFO - Database schema initialized
+2025-05-14 16:33:19,305 - INFO - Environment variables loaded
+2025-05-14 16:33:19,567 - INFO - DeepSeek client initialized
+2025-05-14 16:33:19,713 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:33:19,713 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:33:19,744 - INFO - Database schema initialized
+2025-05-14 16:33:23,053 - INFO - Environment variables loaded
+2025-05-14 16:33:23,677 - INFO - DeepSeek client initialized
+2025-05-14 16:33:23,678 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:33:23,699 - INFO - Database schema initialized
+2025-05-14 16:33:24,772 - INFO - Deleted database file emails.db
+2025-05-14 16:33:25,820 - INFO - Database cleared and schema reinitialized successfully
+2025-05-14 16:33:25,930 - INFO - Environment variables loaded
+2025-05-14 16:33:26,481 - INFO - DeepSeek client initialized
+2025-05-14 16:33:26,482 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:33:26,503 - INFO - Database schema initialized
+2025-05-14 16:33:29,262 - INFO - Environment variables loaded
+2025-05-14 16:33:29,486 - INFO - Environment variables loaded
+2025-05-14 16:33:29,914 - INFO - DeepSeek client initialized
+2025-05-14 16:33:30,121 - INFO - DeepSeek client initialized
+2025-05-14 16:33:30,122 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:33:30,143 - INFO - Database schema initialized
+2025-05-14 16:33:30,157 - INFO - Starting batch import of 50 emails
+2025-05-14 16:33:30,161 - INFO - Stored email 1 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,163 - INFO - Stored email 2 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,166 - INFO - Stored email 3 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,168 - INFO - Stored email 4 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:33:30,172 - INFO - Stored email 5 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,175 - INFO - Stored email 6 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,178 - INFO - Stored email 7 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,182 - INFO - Stored email 8 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:33:30,185 - INFO - Stored email 9 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,187 - INFO - Stored email 10 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,191 - INFO - Stored email 11 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,193 - INFO - Stored email 12 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:33:30,203 - INFO - Stored email 13 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,209 - INFO - Stored email 14 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,212 - INFO - Stored email 15 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,215 - INFO - Stored email 16 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,218 - INFO - Stored email 17 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:33:30,220 - INFO - Stored email 18 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,223 - INFO - Stored email 19 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:33:30,226 - INFO - Stored email 20 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,229 - INFO - Stored email 21 from engineer@company.com to maintenance@company.com
+2025-05-14 16:33:30,233 - INFO - Stored email 22 from engineer@company.com to maintenance@company.com
+2025-05-14 16:33:30,236 - INFO - Stored email 23 from engineer@company.com to maintenance@company.com
+2025-05-14 16:33:30,239 - INFO - Stored email 24 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,242 - INFO - Stored email 25 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:33:30,245 - INFO - Stored email 26 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:33:30,249 - INFO - Stored email 27 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:33:30,251 - INFO - Stored email 28 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,254 - INFO - Stored email 29 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,257 - INFO - Stored email 30 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,260 - INFO - Stored email 31 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,263 - INFO - Stored email 32 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,267 - INFO - Stored email 33 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,271 - INFO - Stored email 34 from engineer@company.com to maintenance@company.com
+2025-05-14 16:33:30,274 - INFO - Stored email 35 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,278 - INFO - Stored email 36 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,285 - INFO - Stored email 37 from engineer@company.com to maintenance@company.com
+2025-05-14 16:33:30,288 - INFO - Stored email 38 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:33:30,291 - INFO - Stored email 39 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,293 - INFO - Stored email 40 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,296 - INFO - Stored email 41 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,298 - INFO - Stored email 42 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:33:30,301 - INFO - Stored email 43 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:33:30,306 - INFO - Stored email 44 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,309 - INFO - Stored email 45 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,311 - INFO - Stored email 46 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:33:30,315 - INFO - Stored email 47 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,318 - INFO - Stored email 48 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:33:30,322 - INFO - Stored email 49 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:33:30,325 - INFO - Stored email 50 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:33:30,328 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 16:33:32,362 - INFO - Environment variables loaded
+2025-05-14 16:33:32,948 - INFO - DeepSeek client initialized
+2025-05-14 16:33:32,951 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:33:32,973 - INFO - Database schema initialized
+2025-05-14 16:33:33,303 - INFO - Environment variables loaded
+2025-05-14 16:33:33,846 - INFO - DeepSeek client initialized
+2025-05-14 16:33:33,848 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:33:33,870 - INFO - Database schema initialized
+2025-05-14 16:34:21,067 - INFO - Environment variables loaded
+2025-05-14 16:34:21,303 - INFO - DeepSeek client initialized
+2025-05-14 16:34:21,315 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:34:21,315 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:21,334 - INFO - Database schema initialized
+2025-05-14 16:34:23,498 - INFO - Environment variables loaded
+2025-05-14 16:34:23,722 - INFO - DeepSeek client initialized
+2025-05-14 16:34:23,723 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:23,726 - INFO - Database schema initialized
+2025-05-14 16:34:28,383 - INFO - Environment variables loaded
+2025-05-14 16:34:28,917 - INFO - DeepSeek client initialized
+2025-05-14 16:34:28,918 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:28,938 - INFO - Database schema initialized
+2025-05-14 16:34:29,971 - INFO - Deleted database file emails.db
+2025-05-14 16:34:31,004 - INFO - Database cleared and schema reinitialized successfully
+2025-05-14 16:34:31,114 - INFO - Environment variables loaded
+2025-05-14 16:34:31,690 - INFO - DeepSeek client initialized
+2025-05-14 16:34:31,691 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:31,712 - INFO - Database schema initialized
+2025-05-14 16:34:33,137 - INFO - Environment variables loaded
+2025-05-14 16:34:33,792 - INFO - DeepSeek client initialized
+2025-05-14 16:34:33,794 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:33,804 - INFO - Database schema initialized
+2025-05-14 16:34:39,656 - INFO - Environment variables loaded
+2025-05-14 16:34:39,877 - INFO - Environment variables loaded
+2025-05-14 16:34:40,305 - INFO - DeepSeek client initialized
+2025-05-14 16:34:40,542 - INFO - DeepSeek client initialized
+2025-05-14 16:34:40,543 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:40,563 - INFO - Database schema initialized
+2025-05-14 16:34:40,577 - INFO - Starting batch import of 50 emails
+2025-05-14 16:34:40,583 - INFO - Stored email 1 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,588 - INFO - Stored email 2 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,592 - INFO - Stored email 3 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,597 - INFO - Stored email 4 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:40,601 - INFO - Stored email 5 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,604 - INFO - Stored email 6 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,608 - INFO - Stored email 7 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,611 - INFO - Stored email 8 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:40,614 - INFO - Stored email 9 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,618 - INFO - Stored email 10 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,622 - INFO - Stored email 11 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,626 - INFO - Stored email 12 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:40,630 - INFO - Stored email 13 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,634 - INFO - Stored email 14 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,637 - INFO - Stored email 15 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,640 - INFO - Stored email 16 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,644 - INFO - Stored email 17 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:40,647 - INFO - Stored email 18 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,651 - INFO - Stored email 19 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:40,656 - INFO - Stored email 20 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,659 - INFO - Stored email 21 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:40,664 - INFO - Stored email 22 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:40,667 - INFO - Stored email 23 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:40,670 - INFO - Stored email 24 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,673 - INFO - Stored email 25 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:40,676 - INFO - Stored email 26 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:40,680 - INFO - Stored email 27 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:40,683 - INFO - Stored email 28 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,687 - INFO - Stored email 29 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,691 - INFO - Stored email 30 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,694 - INFO - Stored email 31 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,698 - INFO - Stored email 32 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,702 - INFO - Stored email 33 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,705 - INFO - Stored email 34 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:40,708 - INFO - Stored email 35 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,711 - INFO - Stored email 36 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,714 - INFO - Stored email 37 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:40,718 - INFO - Stored email 38 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:40,722 - INFO - Stored email 39 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,725 - INFO - Stored email 40 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,730 - INFO - Stored email 41 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,733 - INFO - Stored email 42 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:40,736 - INFO - Stored email 43 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:40,740 - INFO - Stored email 44 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,744 - INFO - Stored email 45 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,747 - INFO - Stored email 46 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:40,752 - INFO - Stored email 47 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,754 - INFO - Stored email 48 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:40,759 - INFO - Stored email 49 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:40,763 - INFO - Stored email 50 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:40,782 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 16:34:42,411 - INFO - Environment variables loaded
+2025-05-14 16:34:42,948 - INFO - DeepSeek client initialized
+2025-05-14 16:34:42,950 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:42,973 - INFO - Database schema initialized
+2025-05-14 16:34:48,791 - INFO - Environment variables loaded
+2025-05-14 16:34:49,375 - INFO - DeepSeek client initialized
+2025-05-14 16:34:49,377 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:49,400 - INFO - Database schema initialized
+2025-05-14 16:34:49,427 - INFO - Starting batch import of 50 emails
+2025-05-14 16:34:49,436 - INFO - Stored email 51 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,443 - INFO - Stored email 52 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,450 - INFO - Stored email 53 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,458 - INFO - Stored email 54 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:49,465 - INFO - Stored email 55 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,470 - INFO - Stored email 56 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,477 - INFO - Stored email 57 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,483 - INFO - Stored email 58 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:49,488 - INFO - Stored email 59 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,494 - INFO - Stored email 60 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,499 - INFO - Stored email 61 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,504 - INFO - Stored email 62 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:49,510 - INFO - Stored email 63 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,515 - INFO - Stored email 64 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,520 - INFO - Stored email 65 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,525 - INFO - Stored email 66 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,531 - INFO - Stored email 67 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:49,536 - INFO - Stored email 68 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,543 - INFO - Stored email 69 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:49,547 - INFO - Stored email 70 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,551 - INFO - Stored email 71 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:49,556 - INFO - Stored email 72 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:49,559 - INFO - Stored email 73 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:49,562 - INFO - Stored email 74 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,566 - INFO - Stored email 75 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:49,569 - INFO - Stored email 76 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:49,574 - INFO - Stored email 77 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:49,578 - INFO - Stored email 78 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,581 - INFO - Stored email 79 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,585 - INFO - Stored email 80 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,589 - INFO - Stored email 81 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,593 - INFO - Stored email 82 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,597 - INFO - Stored email 83 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,602 - INFO - Stored email 84 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:49,605 - INFO - Stored email 85 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,609 - INFO - Stored email 86 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,613 - INFO - Stored email 87 from engineer@company.com to maintenance@company.com
+2025-05-14 16:34:49,618 - INFO - Stored email 88 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:49,621 - INFO - Stored email 89 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,625 - INFO - Stored email 90 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,628 - INFO - Stored email 91 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,632 - INFO - Stored email 92 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:49,635 - INFO - Stored email 93 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:34:49,638 - INFO - Stored email 94 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,643 - INFO - Stored email 95 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,645 - INFO - Stored email 96 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:34:49,650 - INFO - Stored email 97 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,653 - INFO - Stored email 98 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:34:49,658 - INFO - Stored email 99 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:34:49,660 - INFO - Stored email 100 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:34:49,680 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 16:34:51,720 - INFO - Environment variables loaded
+2025-05-14 16:34:52,360 - INFO - DeepSeek client initialized
+2025-05-14 16:34:52,362 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:34:52,388 - INFO - Database schema initialized
+2025-05-14 16:34:59,775 - INFO - Environment variables loaded
+2025-05-14 16:35:00,346 - INFO - DeepSeek client initialized
+2025-05-14 16:35:00,347 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:35:00,374 - INFO - Database schema initialized
+2025-05-14 16:35:01,439 - INFO - Deleted database file emails.db
+2025-05-14 16:35:02,502 - INFO - Database cleared and schema reinitialized successfully
+2025-05-14 16:35:02,638 - INFO - Environment variables loaded
+2025-05-14 16:35:03,164 - INFO - DeepSeek client initialized
+2025-05-14 16:35:03,166 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:35:03,192 - INFO - Database schema initialized
+2025-05-14 16:35:03,557 - INFO - Environment variables loaded
+2025-05-14 16:35:04,034 - INFO - DeepSeek client initialized
+2025-05-14 16:35:04,035 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:35:04,060 - INFO - Database schema initialized
+2025-05-14 16:35:04,075 - INFO - Starting batch import of 50 emails
+2025-05-14 16:35:04,079 - INFO - Stored email 1 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,085 - INFO - Stored email 2 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,090 - INFO - Stored email 3 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,095 - INFO - Stored email 4 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:35:04,098 - INFO - Stored email 5 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,101 - INFO - Stored email 6 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,105 - INFO - Stored email 7 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,108 - INFO - Stored email 8 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:35:04,111 - INFO - Stored email 9 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,114 - INFO - Stored email 10 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,117 - INFO - Stored email 11 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,119 - INFO - Stored email 12 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:35:04,123 - INFO - Stored email 13 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,126 - INFO - Stored email 14 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,130 - INFO - Stored email 15 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,134 - INFO - Stored email 16 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,138 - INFO - Stored email 17 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:35:04,141 - INFO - Stored email 18 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,145 - INFO - Stored email 19 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:35:04,148 - INFO - Stored email 20 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,152 - INFO - Stored email 21 from engineer@company.com to maintenance@company.com
+2025-05-14 16:35:04,156 - INFO - Stored email 22 from engineer@company.com to maintenance@company.com
+2025-05-14 16:35:04,160 - INFO - Stored email 23 from engineer@company.com to maintenance@company.com
+2025-05-14 16:35:04,164 - INFO - Stored email 24 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,167 - INFO - Stored email 25 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:35:04,171 - INFO - Stored email 26 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:35:04,175 - INFO - Stored email 27 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:35:04,179 - INFO - Stored email 28 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,184 - INFO - Stored email 29 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,189 - INFO - Stored email 30 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,194 - INFO - Stored email 31 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,199 - INFO - Stored email 32 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,204 - INFO - Stored email 33 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,210 - INFO - Stored email 34 from engineer@company.com to maintenance@company.com
+2025-05-14 16:35:04,215 - INFO - Stored email 35 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,220 - INFO - Stored email 36 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,225 - INFO - Stored email 37 from engineer@company.com to maintenance@company.com
+2025-05-14 16:35:04,231 - INFO - Stored email 38 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:35:04,237 - INFO - Stored email 39 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,241 - INFO - Stored email 40 from plant.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,243 - INFO - Stored email 41 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,249 - INFO - Stored email 42 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:35:04,254 - INFO - Stored email 43 from production.lead@company.com to maintenance@company.com
+2025-05-14 16:35:04,259 - INFO - Stored email 44 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,264 - INFO - Stored email 45 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,268 - INFO - Stored email 46 from safety.officer@company.com to maintenance@company.com
+2025-05-14 16:35:04,274 - INFO - Stored email 47 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,278 - INFO - Stored email 48 from quality.control@company.com to maintenance@company.com
+2025-05-14 16:35:04,284 - INFO - Stored email 49 from operations.manager@company.com to maintenance@company.com
+2025-05-14 16:35:04,288 - INFO - Stored email 50 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 16:35:04,308 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 16:35:05,384 - INFO - Environment variables loaded
+2025-05-14 16:35:05,937 - INFO - DeepSeek client initialized
+2025-05-14 16:35:05,939 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:35:05,959 - INFO - Database schema initialized
+2025-05-14 16:35:12,197 - INFO - Environment variables loaded
+2025-05-14 16:35:12,903 - INFO - DeepSeek client initialized
+2025-05-14 16:35:12,905 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:35:12,926 - INFO - Database schema initialized
+2025-05-14 16:35:13,175 - INFO - Environment variables loaded
+2025-05-14 16:35:13,792 - INFO - DeepSeek client initialized
+2025-05-14 16:35:13,794 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:35:13,807 - INFO - Database schema initialized
+2025-05-14 16:44:37,353 - INFO - Environment variables loaded
+2025-05-14 16:44:38,091 - INFO - DeepSeek client initialized
+2025-05-14 16:44:38,392 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:44:38,393 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:44:38,416 - INFO - Database schema initialized
+2025-05-14 16:44:45,951 - INFO - Environment variables loaded
+2025-05-14 16:44:46,610 - INFO - DeepSeek client initialized
+2025-05-14 16:44:46,613 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:44:46,635 - INFO - Database schema initialized
