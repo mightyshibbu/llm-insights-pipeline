@@ -1279,3 +1279,76 @@ Did you mean: "force_compression"
 2025-05-14 16:48:22,931 - INFO - DuckDB connection established to emails.db
 2025-05-14 16:48:22,938 - INFO - Database schema initialized
 >>>>>>> origin/master
+2025-05-14 11:33:56,617 - INFO - Environment variables loaded
+2025-05-14 11:33:56,644 - INFO - DeepSeek client initialized
+2025-05-14 11:33:56,658 - INFO - New DuckDB connection established to emails.db
+2025-05-14 11:33:56,659 - INFO - DuckDB connection established to emails.db
+2025-05-14 11:33:56,661 - INFO - Database schema initialized
+2025-05-14 11:34:00,403 - INFO - Environment variables loaded
+2025-05-14 11:34:00,412 - INFO - DeepSeek client initialized
+2025-05-14 11:34:00,413 - INFO - DuckDB connection established to emails.db
+2025-05-14 11:34:00,415 - INFO - Database schema initialized
+2025-05-14 11:34:08,146 - INFO - Environment variables loaded
+2025-05-14 11:34:08,158 - INFO - DeepSeek client initialized
+2025-05-14 11:34:08,159 - INFO - DuckDB connection established to emails.db
+2025-05-14 11:34:08,162 - INFO - Database schema initialized
+2025-05-14 11:34:08,335 - INFO - Environment variables loaded
+2025-05-14 11:34:08,349 - INFO - DeepSeek client initialized
+2025-05-14 11:34:08,350 - INFO - DuckDB connection established to emails.db
+2025-05-14 11:34:08,352 - INFO - Database schema initialized
+2025-05-14 11:34:08,360 - INFO - Starting batch import of 50 emails
+2025-05-14 11:34:08,395 - INFO - Stored email 1 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,403 - INFO - Stored email 2 from plant.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,405 - INFO - Stored email 3 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,408 - INFO - Stored email 4 from production.lead@company.com to maintenance@company.com
+2025-05-14 11:34:08,409 - INFO - Stored email 5 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,411 - INFO - Stored email 6 from plant.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,413 - INFO - Stored email 7 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,415 - INFO - Stored email 8 from safety.officer@company.com to maintenance@company.com
+2025-05-14 11:34:08,417 - INFO - Stored email 9 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,419 - INFO - Stored email 10 from plant.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,421 - INFO - Stored email 11 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,422 - INFO - Stored email 12 from production.lead@company.com to maintenance@company.com
+2025-05-14 11:34:08,424 - INFO - Stored email 13 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,426 - INFO - Stored email 14 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,429 - INFO - Stored email 15 from plant.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,431 - INFO - Stored email 16 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,433 - INFO - Stored email 17 from safety.officer@company.com to maintenance@company.com
+2025-05-14 11:34:08,435 - INFO - Stored email 18 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,437 - INFO - Stored email 19 from production.lead@company.com to maintenance@company.com
+2025-05-14 11:34:08,438 - INFO - Stored email 20 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,440 - INFO - Stored email 21 from engineer@company.com to maintenance@company.com
+2025-05-14 11:34:08,442 - INFO - Stored email 22 from engineer@company.com to maintenance@company.com
+2025-05-14 11:34:08,443 - INFO - Stored email 23 from engineer@company.com to maintenance@company.com
+2025-05-14 11:34:08,444 - INFO - Stored email 24 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,446 - INFO - Stored email 25 from production.lead@company.com to maintenance@company.com
+2025-05-14 11:34:08,448 - INFO - Stored email 26 from safety.officer@company.com to maintenance@company.com
+2025-05-14 11:34:08,449 - INFO - Stored email 27 from safety.officer@company.com to maintenance@company.com
+2025-05-14 11:34:08,451 - INFO - Stored email 28 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,453 - INFO - Stored email 29 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,455 - INFO - Stored email 30 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,456 - INFO - Stored email 31 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,457 - INFO - Stored email 32 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,459 - INFO - Stored email 33 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,461 - INFO - Stored email 34 from engineer@company.com to maintenance@company.com
+2025-05-14 11:34:08,463 - INFO - Stored email 35 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,465 - INFO - Stored email 36 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,466 - INFO - Stored email 37 from engineer@company.com to maintenance@company.com
+2025-05-14 11:34:08,468 - INFO - Stored email 38 from safety.officer@company.com to maintenance@company.com
+2025-05-14 11:34:08,470 - INFO - Stored email 39 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,472 - INFO - Stored email 40 from plant.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,473 - INFO - Stored email 41 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,475 - INFO - Stored email 42 from production.lead@company.com to maintenance@company.com
+2025-05-14 11:34:08,477 - INFO - Stored email 43 from production.lead@company.com to maintenance@company.com
+2025-05-14 11:34:08,479 - INFO - Stored email 44 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,481 - INFO - Stored email 45 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,483 - INFO - Stored email 46 from safety.officer@company.com to maintenance@company.com
+2025-05-14 11:34:08,484 - INFO - Stored email 47 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,488 - INFO - Stored email 48 from quality.control@company.com to maintenance@company.com
+2025-05-14 11:34:08,490 - INFO - Stored email 49 from operations.manager@company.com to maintenance@company.com
+2025-05-14 11:34:08,492 - INFO - Stored email 50 from shift.supervisor@company.com to maintenance@company.com
+2025-05-14 11:34:08,495 - INFO - Batch import completed successfully: 50 emails imported
+2025-05-14 11:34:13,553 - INFO - Environment variables loaded
+2025-05-14 11:34:13,564 - INFO - DeepSeek client initialized
+2025-05-14 11:34:13,565 - INFO - DuckDB connection established to emails.db
+2025-05-14 11:34:13,566 - INFO - Database schema initialized
