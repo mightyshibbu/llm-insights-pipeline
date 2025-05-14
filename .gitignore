@@ -1,0 +1,8 @@
+# ignore the local DuckDB database
+emails.db
+
+# ignore the app.log file
+app.log
+
+# ignore the .env file
+.env
