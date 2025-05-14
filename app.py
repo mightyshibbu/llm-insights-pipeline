@@ -344,23 +344,41 @@ def process_batch(batch, batch_num, total_batches):
             max_tokens=2000
         )
         
-        response_text = response.choices[0].message.content
+        response_text = None
+        try:
+            response_text = response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"Failed to get response content: {str(e)}")
+            logger.error(f"Full response object: {response}")
+
+        if not response_text:
+            logger.error(f"No response content received for batch {batch_num}")
+            return None
         
         # Parse the response
-        parts = re.split(r'(PROCESS MISTAKES:|FAILURE PATTERNS:|COMMON THEMES:)', response_text)
-        section_map = {}
-        for idx in range(1, len(parts), 2):
-            header = parts[idx].rstrip(':')
-            content = parts[idx+1].strip()
-            section_map[header] = content
+        try:
+            parts = re.split(r'(PROCESS MISTAKES:|FAILURE PATTERNS:|COMMON THEMES:)', response_text)
+            section_map = {}
+            for idx in range(1, len(parts), 2):
+                header = parts[idx].rstrip(':')
+                content = parts[idx+1].strip()
+                section_map[header] = content
+        except Exception as e:
+            logger.error(f"Error parsing response for batch {batch_num}: {str(e)}")
+            logger.error(f"Response text: {response_text}")
+            return None
 
         # Store analysis results for each email in the batch
         for id, _, _, _ in batch:
+            # Defensive check for None values
+            pm = section_map.get("PROCESS MISTAKES", "") or ""
+            fp = section_map.get("FAILURE PATTERNS", "") or ""
+            ct = section_map.get("COMMON THEMES", "") or ""
             store_analysis_results(
                 id,
-                section_map.get("PROCESS MISTAKES", ""),
-                section_map.get("FAILURE PATTERNS", ""),
-                section_map.get("COMMON THEMES", "")
+                pm,
+                fp,
+                ct
             )
 
         return section_map
@@ -613,6 +631,11 @@ def cache_query_result(query_text, response_text, context_size):
 def store_analysis_results(email_id, process_mistakes, failure_patterns, common_themes):
     """Store LLM analysis results in database"""
     try:
+        # Defensive check to convert None to empty string
+        pm = process_mistakes if process_mistakes is not None else ""
+        fp = failure_patterns if failure_patterns is not None else ""
+        ct = common_themes if common_themes is not None else ""
+
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM analysis_results").fetchone()[0]
         
@@ -620,7 +643,7 @@ def store_analysis_results(email_id, process_mistakes, failure_patterns, common_
             INSERT INTO analysis_results 
             (id, email_id, process_mistakes, failure_patterns, common_themes)
             VALUES (?, ?, ?, ?, ?)
-        ''', (next_id, email_id, process_mistakes, failure_patterns, common_themes))
+        ''', (next_id, email_id, pm, fp, ct))
         logger.info(f"Stored analysis results for email {email_id}")
         return True
     except Exception as e:

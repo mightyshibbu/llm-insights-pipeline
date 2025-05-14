@@ -1352,3 +1352,8 @@ Did you mean: "force_compression"
 2025-05-14 11:34:13,564 - INFO - DeepSeek client initialized
 2025-05-14 11:34:13,565 - INFO - DuckDB connection established to emails.db
 2025-05-14 11:34:13,566 - INFO - Database schema initialized
+2025-05-14 17:08:04,104 - INFO - Environment variables loaded
+2025-05-14 17:08:04,333 - INFO - DeepSeek client initialized
+2025-05-14 17:08:04,342 - INFO - New DuckDB connection established to emails.db
+2025-05-14 17:08:04,344 - INFO - DuckDB connection established to emails.db
+2025-05-14 17:08:04,353 - INFO - Database schema initialized
