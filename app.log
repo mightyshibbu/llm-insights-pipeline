@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 2025-05-14 14:13:37,412 - INFO - Environment variables loaded
 2025-05-14 14:13:37,658 - INFO - DeepSeek client initialized
 2025-05-14 14:13:37,692 - INFO - DuckDB connection established to emails.db
@@ -1271,3 +1272,10 @@ Did you mean: "force_compression"
 2025-05-14 11:27:29,998 - INFO - DeepSeek client initialized
 2025-05-14 11:27:30,004 - INFO - DuckDB connection established to emails.db
 2025-05-14 11:27:30,007 - INFO - Database schema initialized
+=======
+2025-05-14 16:48:22,598 - INFO - Environment variables loaded
+2025-05-14 16:48:22,916 - INFO - DeepSeek client initialized
+2025-05-14 16:48:22,930 - INFO - New DuckDB connection established to emails.db
+2025-05-14 16:48:22,931 - INFO - DuckDB connection established to emails.db
+2025-05-14 16:48:22,938 - INFO - Database schema initialized
+>>>>>>> origin/master
