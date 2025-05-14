@@ -453,65 +453,24 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
 
 def clear_emails_table():
     """Clear the emails table and all dependent tables"""
+    global conn
     try:
-        # Start a transaction
-        conn.execute("BEGIN TRANSACTION")
-        
-        # Drop and recreate tables in correct order
-        conn.execute('DROP TABLE IF EXISTS analysis_results')
-        conn.execute('DROP TABLE IF EXISTS query_cache')
-        conn.execute('DROP TABLE IF EXISTS email_embeddings')
-        conn.execute('DROP TABLE IF EXISTS emails')
-        
-        # Recreate tables
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS emails (
-                id INTEGER PRIMARY KEY,
-                tenant_id INTEGER,
-                email_to VARCHAR,
-                email_from VARCHAR,
-                email_subject VARCHAR,
-                email_text_body TEXT,
-                email_html_body TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                analyzed_at TIMESTAMP DEFAULT NULL,
-                is_analyzed BOOLEAN DEFAULT FALSE
-            )
-        ''')
-        
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS analysis_results (
-                id INTEGER PRIMARY KEY,
-                email_id INTEGER,
-                process_mistakes TEXT,
-                failure_patterns TEXT,
-                common_themes TEXT,
-                analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (email_id) REFERENCES emails(id)
-            )
-        ''')
-        
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS query_cache (
-                id INTEGER PRIMARY KEY,
-                query_text TEXT,
-                response_text TEXT,
-                context_size INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                access_count INTEGER DEFAULT 0
-            )
-        ''')
-        
-        # Commit the transaction
-        conn.execute("COMMIT")
-        
-        logger.info("All tables cleared and recreated successfully")
+        # Close current connection
+        conn.close()
+        # Delete the database file to fully clear data and reduce file size
+        import os
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            logger.info(f"Deleted database file {db_path}")
+        # Reconnect and reinitialize database
+        conn = duckdb.connect(db_path)
+        if not init_database():
+            logger.error("Failed to reinitialize database after clearing")
+            return False
+        logger.info("Database cleared by deleting file and reinitializing")
         return True
     except Exception as e:
-        # Rollback on error
-        conn.execute("ROLLBACK")
-        logger.error(f"Error clearing tables: {str(e)}")
+        logger.error(f"Error clearing database: {str(e)}")
         return False
 
 def get_email_context(limit=50):
