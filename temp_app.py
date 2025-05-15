@@ -272,14 +272,16 @@ def summarize_emails_bulk(batch):
         response_text = response.choices[0].message.content.strip()
         
         # Split response into individual email summaries
-        email_blocks = response_text.split('Email ID')
-        for block in email_blocks[1:]:  # Skip the first empty block
+        # Use regex to find all blocks starting with a number and a separator, e.g. "54.)", "61—", "64)", or "Email ID X:"
+        pattern = re.compile(r'(?:Email ID\s*)?(\d+)[\.\)\-\—]*\s*(.*?)(?=(?:\n\d+[\.\)\-\—]*\s)|$)', re.DOTALL)
+        matches = pattern.findall(response_text)
+        
+        for email_id_str, summary in matches:
             try:
-                id_str, summary = block.split(':', 1)
-                email_id = int(id_str.strip())
+                email_id = int(email_id_str)
                 summaries[email_id] = summary.strip()
-            except (ValueError, IndexError):
-                logger.warning(f"Failed to parse summary for block: {block}")
+            except ValueError:
+                logger.warning(f"Failed to parse email ID: {email_id_str}")
                 continue
         
         # Fill in any missing summaries with truncated text
@@ -821,125 +823,8 @@ with col2:
         else:
             st.error('❌ Failed to clear emails')
 
-  
-    # Show Analysis Results Button
-    if st.button('📊 Show Analysis Results'):
-        try:
-            # Query analysis results joined with emails
-            query = '''
-                SELECT 
-                    ar.email_id,
-                    e.email_subject,
-                    ar.process_mistakes,
-                    ar.failure_patterns,
-                    ar.common_themes,
-                    ar.analysis_date
-                FROM analysis_results ar
-                JOIN emails e ON ar.email_id = e.id
-                ORDER BY ar.analysis_date DESC
-            '''
-            analysis_results = conn.execute(query).fetchdf()
-
-            if not analysis_results.empty:
-                # Format datetime column
-                analysis_results['analysis_date'] = analysis_results['analysis_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                # Rename columns for better display
-                analysis_results = analysis_results.rename(columns={
-                    'email_id': 'Email ID',
-                    'email_subject': 'Subject',
-                    'process_mistakes': 'Process Mistakes',
-                    'failure_patterns': 'Failure Patterns',
-                    'common_themes': 'Common Themes',
-                    'analysis_date': 'Analysis Date'
-                })
-
-                # Display the analysis results table
-                st.dataframe(analysis_results, use_container_width=True)
-            else:
-                st.info("No analysis results found in the database.")
-        except Exception as e:
-            logger.error(f"Error displaying analysis results: {str(e)}")
-            st.error("Error displaying analysis results. Please check the logs for details.")
-
-# Right Column - RAG Query Interface
-with col3:
-    st.subheader('🤖 AI Query Interface')
-    
-    # Query input
-    query = st.text_area(
-        label="Ask a question about the emails",
-        height=100,
-        placeholder="Example: What are the most common maintenance issues reported?",
-        key="rag_query"
-    )
-    
-    # Context size control
-    context_size = st.slider(
-        "Number of recent emails to consider",
-        min_value=10,
-        max_value=100,
-        value=50,
-        step=10,
-        help="Adjust how many recent emails to include in the context"
-    )
-    
-    if st.button('🔍 Query Emails'):
-        if query:
-            with st.spinner('Analyzing emails...'):
-                # Get context from recent emails
-                context = get_email_context(context_size)
-                
-                # Query LLM with context
-                response = query_llm_with_context(query, context)
-                
-                # Store in session state
-                st.session_state['last_query'] = {
-                    'query': query,
-                    'response': response,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-        else:
-            st.warning('Please enter a question to analyze.')
-    
-    # Display last query result
-    if 'last_query' in st.session_state:
-        st.markdown(f"**Last Query:** {st.session_state['last_query']['timestamp']}")
-        st.markdown("### Question")
-        st.write(st.session_state['last_query']['query'])
-        st.markdown("### Response")
-        st.write(st.session_state['last_query']['response'])
-
-# Footer with metrics
-st.markdown("---")
-st.markdown("### 📈 Dashboard Status")
-status_col1, status_col2, status_col3 = st.columns(3)
-
-with status_col1:
-    try:
-        # Ensure we have a valid connection
-        conn = get_db_connection()
-        if conn:
-            try:
-                count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-                st.metric("Total Emails", count)
-            except Exception as e:
-                if "Table with name emails does not exist" in str(e):
-                    st.metric("Total Emails", "0")
-                else:
-                    logger.error(f"Error getting email count: {str(e)}")
-                    st.metric("Total Emails", "Error")
-        else:
-            st.metric("Total Emails", "Error")
-    except Exception as e:
-        logger.error(f"Error getting email count: {str(e)}")
-        st.metric("Total Emails", "Error")
-
-with status_col2:
-    st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
-
-with status_col3:
-    if st.button('📋 Show Table'):
+    # Show Emails Table Button
+    if st.button('📋 Show Emails Table'):
         try:
             # Get all emails with their analysis status
             query = '''
@@ -980,4 +865,50 @@ with status_col3:
         except Exception as e:
             logger.error(f"Error displaying table: {str(e)}")
             st.error("Error displaying table. Please check the logs for details.")
+
+    # Show Analysis Results Button
+    if st.button('📊 Show Analysis Results'):
+        try:
+            # Query analysis results joined with emails
+            query = '''
+                SELECT 
+                    ar.email_id,
+                    e.email_subject,
+                    ar.process_mistakes,
+                    ar.failure_patterns,
+                    ar.common_themes,
+                    ar.analysis_date
+                FROM analysis_results ar
+                JOIN emails e ON ar.email_id = e.id
+                ORDER BY ar.analysis_date DESC
+            '''
+            analysis_results = conn.execute(query).fetchdf()
+
+            if not analysis_results.empty:
+                # Format datetime column
+                analysis_results['analysis_date'] = analysis_results['analysis_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                # Rename columns for better display
+                analysis_results = analysis_results.rename(columns={
+                    'email_id': 'Email ID',
+                    'email_subject': 'Subject',
+                    'process_mistakes': 'Process Mistakes',
+                    'failure_patterns': 'Failure Patterns',
+                    'common_themes': 'Common Themes',
+                    'analysis_date': 'Analysis Date'
+                })
+
+                # Display the analysis results table
+                st.dataframe(analysis_results, use_container_width=True)
+            else:
+                st.info("No analysis results found in the database.")
+        except Exception as e:
+            logger.error(f"Error displaying analysis results: {str(e)}")
+            st.error("Error displaying analysis results. Please check the logs for details.")
+
+with status_col2:
+    st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
+
+with status_col3:
+    pass
 

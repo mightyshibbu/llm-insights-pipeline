@@ -7,3 +7,4 @@ python-dotenv==1.0.1
 numpy==1.26.4
 sentence-transformers==2.5.1
 httpx
+opensearch-py==2.1.0
