@@ -1,9 +1,10 @@
 import streamlit as st
 import duckdb
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
-from openai import OpenAI
+from groq import Groq
+import requests
 from dotenv import load_dotenv
 import logging
 import sys
@@ -25,109 +26,387 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
-logger.info("Environment variables loaded")
+# Load environment variables only once
+if 'env_loaded' not in st.session_state:
+    load_dotenv()
+    st.session_state.env_loaded = True
+    logger.info("Environment variables loaded")
 
-# Initialize OpenAI client
-client = OpenAI(
-    api_key=os.getenv('DEEPSEEK_API_KEY'),
-    base_url="https://api.deepseek.com/v1"
-)
-logger.info("DeepSeek client initialized")
+# Model configurations
+DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
+DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')  # Default DeepSeek model
+GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
-# Initialize DuckDB connection
-db_path = 'emails.db'
+# Query model configurations
+QUERY_MODEL_CONFIGS = {
+    'deepseek': {
+        'name': DEEPSEEK_MODEL,
+        'max_tokens': int(os.getenv('DEEPSEEK_MAX_TOKENS', 8192)),
+        'temperature': float(os.getenv('DEEPSEEK_TEMPERATURE', 0.5))
+    },
+    'groq': {
+        'name': GROQ_MODEL,
+        'max_tokens': int(os.getenv('GROQ_MAX_TOKENS', 8192)),
+        'temperature': float(os.getenv('GROQ_TEMPERATURE', 0.5)),
+        'top_p': float(os.getenv('GROQ_TOP_P', 1)),
+        'frequency_penalty': float(os.getenv('GROQ_FREQUENCY_PENALTY', 0))
+    }
+}
+
+# Analysis model configuration (using DeepSeek)
+ANALYSIS_MODEL_CONFIG = {
+    'large': {
+        'name': DEEPSEEK_MODEL,
+        'max_tokens': 4096,
+        'temperature': 0.3,
+        'use_cases': ['complex_analysis', 'summarization', 'pattern_detection']
+    },
+    'small': {
+        'name': DEEPSEEK_MODEL,
+        'max_tokens': 2048,
+        'temperature': 0.2,
+        'use_cases': ['simple_queries', 'factual_lookup', 'basic_summary']
+    }
+}
+
+# Add at the top with other global variables
+DB_PATH = 'emails.db'  # Define database path globally
 
 def get_db_connection():
-    """Get a database connection, creating a new one if needed"""
-    try:
-        # Check if connection exists and is valid
-        if 'conn' in st.session_state and st.session_state.conn is not None:
-            try:
-                # Test the connection
-                st.session_state.conn.execute("SELECT 1").fetchone()
-                return st.session_state.conn
-            except Exception:
-                # If test fails, close the connection
-                try:
-                    st.session_state.conn.close()
-                except:
-                    pass
-                st.session_state.conn = None
-        
-        # Create new connection
-        conn = duckdb.connect(db_path)
-        st.session_state.conn = conn
-        logger.info(f"New DuckDB connection established to {db_path}")
-        return conn
-    except Exception as e:
-        logger.error(f"Error connecting to database: {str(e)}")
-        return None
-# Initialize connection
-conn = get_db_connection()
-if not conn:
-    st.error("Failed to connect to database. Please check the logs for details.")
-    st.stop()
+    """Get or create database connection"""
+    if 'conn' not in st.session_state:
+        st.session_state.conn = duckdb.connect(DB_PATH)  # Use global DB_PATH
+    return st.session_state.conn
 
-logger.info(f"DuckDB connection established to {db_path}")
-
-# Create tables if they don't exist
 def init_database():
     """Initialize database tables"""
     try:
-        # Create emails table
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS emails (
-                id INTEGER PRIMARY KEY,
-                tenant_id INTEGER,
-                email_to VARCHAR,
-                email_from VARCHAR,
-                email_subject VARCHAR,
-                email_text_body TEXT,
-                email_html_body TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                analyzed_at TIMESTAMP DEFAULT NULL,
-                is_analyzed BOOLEAN DEFAULT FALSE
-            )
-        ''')
-
-        # Create analysis results table
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS analysis_results (
-                id INTEGER PRIMARY KEY,
-                email_id INTEGER,
-                process_mistakes TEXT,
-                failure_patterns TEXT,
-                common_themes TEXT,
-                analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (email_id) REFERENCES emails(id)
-            )
-        ''')
-
-        # Create query cache table
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS query_cache (
-                id INTEGER PRIMARY KEY,
-                query_text TEXT,
-                response_text TEXT,
-                context_size INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                access_count INTEGER DEFAULT 0
-            )
-        ''')
+        # Start a transaction
+        conn = get_db_connection()
+        conn.execute("BEGIN TRANSACTION")
         
-        logger.info("Database schema initialized")
-        return True
+        try:
+            # Create emails table with only essential columns
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS emails (
+                    id INTEGER PRIMARY KEY,
+                    email_subject VARCHAR,
+                    email_text_body TEXT,
+                    is_analyzed BOOLEAN DEFAULT FALSE,
+                    analyzed_at TIMESTAMP DEFAULT NULL
+                )
+            ''')
+
+            # Create analysis results table with new column names
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS analysis_results_new (
+                    id INTEGER PRIMARY KEY,
+                    email_id INTEGER,
+                    procedural_deviations TEXT,
+                    recurrence_indicators TEXT,
+                    systemic_trends TEXT,
+                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (email_id) REFERENCES emails(id)
+                )
+            ''')
+
+            # Drop and recreate query cache table with model information
+            conn.execute('DROP TABLE IF EXISTS query_cache')
+            conn.execute('''
+                CREATE TABLE query_cache (
+                    id INTEGER PRIMARY KEY,
+                    query_text TEXT,
+                    response_text TEXT,
+                    context_size INTEGER,
+                    model_used VARCHAR,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    access_count INTEGER DEFAULT 0
+                )
+            ''')
+            
+            # Commit the transaction
+            conn.execute("COMMIT")
+            logger.info("Database schema initialized successfully")
+            return True
+            
+        except Exception as e:
+            # Rollback on any error
+            conn.execute("ROLLBACK")
+            logger.error(f"Error initializing database schema: {str(e)}")
+            return False
+            
     except Exception as e:
-        logger.error(f"Error initializing database schema: {str(e)}")
+        logger.error(f"Error in database transaction: {str(e)}")
         return False
 
-# Initialize database
-if not init_database():
-    st.error("Failed to initialize database. Please check the logs for details.")
-    st.stop()
+def get_available_deepseek_models():
+    """Get list of available models from DeepSeek API"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(
+            f"{DEEPSEEK_API_BASE}/v1/models",
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            models = response.json()['data']
+            model_names = [model['id'] for model in models]
+            logger.info(f"Available DeepSeek models: {model_names}")
+            return model_names
+        else:
+            error_msg = f"Error getting DeepSeek models: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return []
+    except Exception as e:
+        logger.error(f"Error fetching DeepSeek models: {str(e)}")
+        return []
+
+# Initialize database connection only once
+if 'db_initialized' not in st.session_state:
+    if not init_database():
+        logger.error("Failed to initialize database")
+        st.error("Failed to initialize database. Please check the logs for details.")
+        st.stop()
+    st.session_state.db_initialized = True
+    logger.info("Database initialized")
+
+# Initialize clients only once using session state
+if 'clients_initialized' not in st.session_state:
+    st.session_state.groq_client = Groq(
+        api_key=os.getenv('GROQ_API_KEY')
+    )
+    st.session_state.clients_initialized = True
+    
+    # Get available DeepSeek models
+    available_models = get_available_deepseek_models()
+    if available_models:
+        logger.info(f"Found {len(available_models)} available DeepSeek models")
+        # Update DEEPSEEK_MODEL if the current one isn't available
+        if DEEPSEEK_MODEL not in available_models and available_models:
+            DEEPSEEK_MODEL = available_models[0]  # Use the first available model
+            logger.info(f"Updated DeepSeek model to: {DEEPSEEK_MODEL}")
+    else:
+        logger.warning("Could not fetch available DeepSeek models")
+    
+    logger.info("Clients initialized")
+
+# Use session state clients
+groq_client = st.session_state.groq_client
+
+# Use session state connection
+conn = st.session_state.conn
+
+# Increase context size limit for better coverage
+MAX_CONTEXT_SIZE = 30000  # Increased from 15000
+MAX_EMAILS_PER_CONTEXT = 50  # Increased from 16
+
+def get_deepseek_model_config():
+    """Get the DeepSeek model configuration, ensuring we use a valid model"""
+    return {
+        'name': DEEPSEEK_MODEL,  # Always use the configured DeepSeek model
+        'max_tokens': int(os.getenv('DEEPSEEK_MAX_TOKENS', 8192)),
+        'temperature': float(os.getenv('DEEPSEEK_TEMPERATURE', 0.5))
+    }
+
+def get_groq_model_config():
+    """Get the Groq model configuration"""
+    return {
+        'name': GROQ_MODEL,
+        'max_tokens': int(os.getenv('GROQ_MAX_TOKENS', 8192)),
+        'temperature': float(os.getenv('GROQ_TEMPERATURE', 0.5)),
+        'top_p': float(os.getenv('GROQ_TOP_P', 1)),
+        'frequency_penalty': float(os.getenv('GROQ_FREQUENCY_PENALTY', 0))
+    }
+
+# Query model configurations - use functions to ensure fresh configs
+QUERY_MODEL_CONFIGS = {
+    'deepseek': get_deepseek_model_config,
+    'groq': get_groq_model_config
+}
+
+def get_deepseek_response(messages, model_config):
+    """Make a request to DeepSeek API directly"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        # Fixed API endpoint URL - ensure no duplicate /v1/
+        api_url = f"{DEEPSEEK_API_BASE}/v1/chat/completions"
+        logger.info(f"Making DeepSeek API request to {api_url}")
+        
+        # Always use the DeepSeek model
+        model_name = DEEPSEEK_MODEL
+        logger.info(f"Using DeepSeek model: {model_name}")
+        
+        # Only include supported parameters
+        data = {
+            "model": model_name,
+            "messages": messages,
+            "temperature": model_config['temperature'],
+            "max_tokens": model_config['max_tokens']
+        }
+        
+        response = requests.post(
+            api_url,
+            headers=headers,
+            json=data
+        )
+        
+        if response.status_code == 200:
+            return response.json()['choices'][0]['message']['content']
+        else:
+            error_msg = f"DeepSeek API error: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            logger.error(f"Request details - URL: {api_url}")
+            logger.error(f"Request details - Model: {model_name}")
+            logger.error(f"Request details - Data: {data}")
+            raise Exception(error_msg)
+            
+    except Exception as e:
+        logger.error(f"Error calling DeepSeek API: {str(e)}")
+        raise
+
+def get_groq_response(messages, model_config):
+    """Make a request to Groq API for queries"""
+    try:
+        response = groq_client.chat.completions.create(
+            model=model_config['name'],
+            messages=messages,
+            temperature=model_config['temperature'],
+            max_tokens=model_config['max_tokens'],
+            top_p=model_config['top_p'],
+            frequency_penalty=model_config['frequency_penalty']
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error calling Groq API: {str(e)}")
+        raise
+
+def get_available_models():
+    """
+    Get list of available models from Together AI.
+    
+    Returns:
+        list: List of available model names
+    """
+    try:
+        # Check if we already have the list in session state
+        if 'available_models' in st.session_state:
+            return st.session_state.available_models
+        
+        # Get models from Together AI
+        try:
+            models = together_client.Models.list()
+            available_models = [model.id for model in models]
+            st.session_state.available_models = available_models
+            logger.info(f"Found {len(available_models)} available models: {available_models}")
+            return available_models
+        except Exception as e:
+            logger.warning(f"Error getting Together AI models: {str(e)}")
+            return [DEEPSEEK_MODEL]  # Fallback to default model
+    except Exception as e:
+        logger.error(f"Error getting available models: {str(e)}")
+        return [DEEPSEEK_MODEL]  # Fallback to default model
+
+def check_model_availability(model_name):
+    """
+    Check if a model is available by making a minimal test request.
+    
+    Args:
+        model_name (str): Name of the model to check
+        
+    Returns:
+        bool: True if model is available, False otherwise
+    """
+    try:
+        # Make a minimal test request
+        response = together_client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "Test"},
+                {"role": "user", "content": "Test"}
+            ],
+            temperature=0.1,
+            max_tokens=5
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Model {model_name} not available: {str(e)}")
+        return False
+
+def summarize_emails_bulk(batch):
+    """Summarize multiple emails in a single LLM call - Uses DeepSeek API directly"""
+    try:
+        # Prepare context with all emails in the batch
+        context = "Summarize these maintenance/service emails in ONE sentence each, focusing on the most critical issue or action needed:\n\n"
+        for id, text_body, subject in batch:
+            context += f"Email ID {id}:\nSubject: {subject}\nBody: {text_body}\n\n"
+        
+        # Use large model for summarization as it's a complex task
+        model_config = select_model('summarization')
+        # Reduce max tokens for summary
+        model_config['max_tokens'] = min(model_config['max_tokens'], 500)
+        
+        # Use DeepSeek API directly for analysis
+        logger.info("Using DeepSeek API for email summarization")
+        response_text = get_deepseek_response(
+            messages=[
+                {"role": "system", "content": "You are an expert at summarizing maintenance and service-related emails. For each email, provide ONE concise sentence focusing on the most critical issue or action needed. Be specific but brief. Format your response with 'Email ID X:' before each summary."},
+                {"role": "user", "content": context}
+            ],
+            model_config=model_config
+        )
+        
+        # Parse the response to extract summaries
+        summaries = {}
+        response_text = response_text.strip()
+        
+        # Split response into individual email summaries
+        email_blocks = response_text.split('Email ID')
+        for block in email_blocks[1:]:  # Skip the first empty block
+            try:
+                id_str, summary = block.split(':', 1)
+                email_id = int(id_str.strip())
+                # Ensure summary is a single sentence
+                summary = summary.strip().split('.')[0] + '.'
+                summaries[email_id] = summary
+            except (ValueError, IndexError):
+                logger.warning(f"Failed to parse summary for block: {block}")
+                continue
+        
+        # Fill in any missing summaries with truncated text
+        for id, text_body, subject in batch:
+            if id not in summaries:
+                logger.warning(f"Using fallback summary for email {id}")
+                # Create a very brief fallback summary
+                summaries[id] = f"Critical issue: {subject[:50]}..."
+        
+        return summaries
+    except Exception as e:
+        logger.error(f"Error in bulk summarization: {str(e)}")
+        # Return very brief fallback summaries
+        return {
+            id: f"Critical issue: {subject[:50]}..."
+            for id, text_body, subject in batch
+        }
+
+def select_model(query_type, query_text=None):
+    """
+    Select the appropriate model based on query type and complexity.
+    For analysis tasks, returns DeepSeek model config.
+    For queries, returns Groq model config.
+    """
+    if query_type in ['simple_queries', 'factual_lookup', 'basic_summary']:
+        return ANALYSIS_MODEL_CONFIG['small'].copy()  # Return a copy to avoid modifying the original
+    return ANALYSIS_MODEL_CONFIG['large'].copy()  # Return a copy to avoid modifying the original
 
 def store_email(email_data):
     """Store email in database"""
@@ -135,25 +414,24 @@ def store_email(email_data):
         email = email_data['Email']
         text_body = email['TextBody'][0] if isinstance(email['TextBody'], list) else email['TextBody']
         
+        # Get database connection
+        conn = get_db_connection()
+        
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM emails").fetchone()[0]
         
+        # Only store essential information
         conn.execute('''
             INSERT INTO emails (
-                id, tenant_id, email_to, email_from, email_subject,
-                email_text_body, email_html_body, is_analyzed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, FALSE)
+                id, email_subject, email_text_body, is_analyzed
+            ) VALUES (?, ?, ?, FALSE)
         ''', (
             next_id,
-            email_data['TenantID'],
-            email['To'],
-            email['From'],
             email['Subject'],
-            text_body,
-            email['HtmlBody']
+            text_body
         ))
         
-        logger.info(f"Stored email {next_id} from {email['From']} to {email['To']}")
+        logger.info(f"Stored email {next_id}: {email['Subject'][:50]}...")
         return True
     except Exception as e:
         logger.error(f"Error storing email: {str(e)}")
@@ -165,6 +443,9 @@ def store_multiple_emails(emails_data):
     success_count = 0
     error_count = 0
     error_messages = []
+
+    # Get database connection
+    conn = get_db_connection()
 
     # Start a transaction
     conn.execute("BEGIN TRANSACTION")
@@ -212,12 +493,11 @@ def create_similarity_batches(emails, batch_size=10, similarity_threshold=0.7):
     
     # Prepare email texts
     email_texts = {}
-    for email in emails:
-        id, text_body, subject, created_at = email
+    for id, text_body, subject in emails:
         full_text = f"Subject: {subject}\nBody: {text_body}"
         email_texts[id] = {
             'text': full_text,
-            'email': email
+            'email': (id, text_body, subject)
         }
     
     # Create batches based on similarity
@@ -249,67 +529,29 @@ def create_similarity_batches(emails, batch_size=10, similarity_threshold=0.7):
     logger.info(f"Created {len(batches)} similarity-based batches")
     return batches
 
-def summarize_emails_bulk(batch):
-    """Summarize multiple emails in a single LLM call"""
-    try:
-        # Prepare context with all emails in the batch
-        context = "Summarize these maintenance/service emails in 2-3 sentences each, focusing on key issues and actions needed:\n\n"
-        for id, text_body, subject, _ in batch:
-            context += f"Email ID {id}:\nSubject: {subject}\nBody: {text_body}\n\n"
-        
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "You are an expert at summarizing maintenance and service-related emails. For each email, provide a concise 2-3 sentence summary focusing on key issues and actions needed. Format your response with 'Email ID X:' before each summary."},
-                {"role": "user", "content": context}
-            ],
-            temperature=0.3,
-            max_tokens=1000
-        )
-        
-        # Parse the response to extract summaries
-        summaries = {}
-        response_text = response.choices[0].message.content.strip()
-        
-        # Split response into individual email summaries
-        email_blocks = response_text.split('Email ID')
-        for block in email_blocks[1:]:  # Skip the first empty block
-            try:
-                id_str, summary = block.split(':', 1)
-                email_id = int(id_str.strip())
-                summaries[email_id] = summary.strip()
-            except (ValueError, IndexError):
-                logger.warning(f"Failed to parse summary for block: {block}")
-                continue
-        
-        # Fill in any missing summaries with truncated text
-        for id, text_body, subject, _ in batch:
-            if id not in summaries:
-                logger.warning(f"Using fallback summary for email {id}")
-                summaries[id] = f"Subject: {subject}\nBody: {text_body[:200]}..."
-        
-        return summaries
-    except Exception as e:
-        logger.error(f"Error in bulk summarization: {str(e)}")
-        # Return fallback summaries for all emails
-        return {
-            id: f"Subject: {subject}\nBody: {text_body[:200]}..."
-            for id, text_body, subject, _ in batch
-        }
-
 def process_batch(batch, batch_num, total_batches):
-    """Process a single batch of emails"""
+    """Process a single batch of emails - Uses DeepSeek API directly"""
     try:
-        logger.info(f"Processing batch {batch_num} of {total_batches}")
+        # Use a separate logger for thread operations to avoid Streamlit context issues
+        thread_logger = logging.getLogger(f'thread_{batch_num}')
+        thread_logger.setLevel(logging.INFO)
+        
+        # Add a handler if none exists
+        if not thread_logger.handlers:
+            handler = logging.StreamHandler(sys.stdout)
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+            thread_logger.addHandler(handler)
+        
+        thread_logger.info(f"Processing batch {batch_num} of {total_batches}")
         
         # Get bulk summaries for all emails in the batch
         summaries = summarize_emails_bulk(batch)
         
-        # Prepare context from summarized emails
+        # Prepare context from summarized emails - more concise format
         context = "Maintenance and service emails:\n"
-        for id, text_body, subject, _ in batch:
-            summary = summaries.get(id, f"Subject: {subject}\nBody: {text_body[:200]}...")
-            context += f"\nEmail {id}:\n{summary}\n"
+        for id, text_body, subject in batch:
+            summary = summaries.get(id, f"Critical issue: {subject[:50]}...")
+            context += f"\nEmail {id}: {summary}\n"
         
         prompt = f"""You are an expert at analyzing maintenance and service-related emails. Analyze these summarized emails and provide specific insights.
 
@@ -317,72 +559,85 @@ def process_batch(batch, batch_num, total_batches):
 
         You MUST provide analysis in EXACTLY these three sections, with these EXACT headers:
 
-        PROCESS MISTAKES:
+        PROCEDURAL DEVIATIONS:
         [Your analysis here]
 
-        FAILURE PATTERNS:
+        RECURRENCE INDICATORS:
         [Your analysis here]
 
-        COMMON THEMES:
+        SYSTEMIC TRENDS:
         [Your analysis here]
 
         For each section:
         1. Start with the EXACT header shown above
-        2. Provide EXACTLY 2 bullet points (no more, no less)
+        2. Provide EXACTLY 1 bullet point (no more, no less)
         3. Each bullet point MUST start with "• Email ID X:" where X is the actual email ID
-        4. Be specific and detailed
-        5. Include examples from the emails"""
+        4. Keep each bullet point to ONE sentence
+        5. Focus on the most critical issue or pattern
+        6. Be specific but concise"""
 
-        response = client.chat.completions.create(
-            model="deepseek-chat",
+        # Use large model for complex analysis
+        model_config = select_model('complex_analysis')
+        # Reduce max tokens for analysis
+        model_config['max_tokens'] = min(model_config['max_tokens'], 1000)
+
+        # Use DeepSeek API directly for analysis
+        thread_logger.info("Using DeepSeek API for batch analysis")
+        response = get_deepseek_response(
             messages=[
-                {"role": "system", "content": "You are an expert at analyzing maintenance and service-related emails. You MUST follow the exact format specified in the prompt, including exactly 2 bullet points per section."},
+                {"role": "system", "content": "You are an expert at analyzing maintenance and service-related emails. You MUST follow the exact format specified in the prompt, including exactly 1 bullet point per section. Keep each bullet point to ONE sentence and focus on the most critical issue."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=2000
+            model_config=model_config
         )
-        
-        response_text = None
-        try:
-            response_text = response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"Failed to get response content: {str(e)}")
-            logger.error(f"Full response object: {response}")
-
-        if not response_text:
-            logger.error(f"No response content received for batch {batch_num}")
-            return None
         
         # Parse the response
         try:
-            parts = re.split(r'(PROCESS MISTAKES:|FAILURE PATTERNS:|COMMON THEMES:)', response_text)
+            parts = re.split(r'(PROCEDURAL DEVIATIONS:|RECURRENCE INDICATORS:|SYSTEMIC TRENDS:)', response)
             section_map = {}
             for idx in range(1, len(parts), 2):
                 header = parts[idx].rstrip(':')
                 content = parts[idx+1].strip()
-                section_map[header] = content
+                # Ensure each bullet point is a single sentence
+                bullet_points = content.split('•')
+                cleaned_points = []
+                for point in bullet_points:
+                    if point.strip():
+                        # Take only the first sentence
+                        first_sentence = point.strip().split('.')[0] + '.'
+                        cleaned_points.append('•' + first_sentence)
+                section_map[header] = '\n'.join(cleaned_points)
         except Exception as e:
-            logger.error(f"Error parsing response for batch {batch_num}: {str(e)}")
-            logger.error(f"Response text: {response_text}")
+            thread_logger.error(f"Error parsing response for batch {batch_num}: {str(e)}")
+            thread_logger.error(f"Response text: {response}")
             return None
 
         # Store analysis results for each email in the batch
-        for id, _, _, _ in batch:
-            # Defensive check for None values
-            pm = section_map.get("PROCESS MISTAKES", "") or ""
-            fp = section_map.get("FAILURE PATTERNS", "") or ""
-            ct = section_map.get("COMMON THEMES", "") or ""
-            store_analysis_results(
-                id,
-                pm,
-                fp,
-                ct
-            )
+        for id, _, _ in batch:
+            # Map old section names to new ones for database storage
+            pd = section_map.get("PROCEDURAL DEVIATIONS", "") or ""
+            ri = section_map.get("RECURRENCE INDICATORS", "") or ""
+            st = section_map.get("SYSTEMIC TRENDS", "") or ""
+            
+            # Use a separate database connection for each thread
+            try:
+                thread_conn = duckdb.connect(DB_PATH)
+                thread_conn.execute('''
+                    INSERT INTO analysis_results_new 
+                    (id, email_id, procedural_deviations, recurrence_indicators, systemic_trends)
+                    VALUES (
+                        (SELECT COALESCE(MAX(id), 0) + 1 FROM analysis_results_new),
+                        ?, ?, ?, ?
+                    )
+                ''', (id, pd, ri, st))
+                thread_logger.info(f"Stored analysis results for email {id}")
+                thread_conn.close()
+            except Exception as e:
+                thread_logger.error(f"Error storing analysis results for email {id}: {str(e)}")
 
         return section_map
     except Exception as e:
-        logger.error(f"Error processing batch {batch_num}: {str(e)}")
+        thread_logger.error(f"Error processing batch {batch_num}: {str(e)}")
         return None
 
 def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=False, similarity_threshold=0.7):
@@ -391,10 +646,10 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
     
     # Get emails based on include_analyzed flag
     query = '''
-        SELECT id, email_text_body, email_subject, created_at
+        SELECT id, email_text_body, email_subject
         FROM emails 
         WHERE is_analyzed = FALSE OR ? = TRUE
-        ORDER BY created_at DESC
+        ORDER BY id DESC
     '''
     all_emails = conn.execute(query, [include_analyzed]).fetchall()
     
@@ -402,25 +657,19 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
         logger.info("No emails found in database")
         return {
             'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'process_mistakes': 'No emails found in database',
-            'failure_patterns': 'No emails found in database',
-            'common_themes': 'No emails found in database',
+            'procedural_deviations': 'No emails found in database',
+            'recurrence_indicators': 'No emails found in database',
+            'systemic_trends': 'No emails found in database',
             'email_count': 0,
             'analysis_stats': {
                 'total_emails': 0,
                 'analyzed_emails': 0,
                 'referenced_emails': 0,
-                'date_range': 'N/A',
                 'batches_processed': 0
             }
         }
     
-    # Calculate date range
-    dates = [created_at for _, _, _, created_at in all_emails]
-    date_range = f"{min(dates).strftime('%Y-%m-%d')} to {max(dates).strftime('%Y-%m-%d')}"
-    
     logger.info(f"Found {len(all_emails)} emails to analyze")
-    logger.info(f"Date range of emails: {date_range}")
     
     # Create batches based on similarity or chronological order
     if use_similarity_batching:
@@ -428,14 +677,16 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
     else:
         batches = [all_emails[i:i + batch_size] for i in range(0, len(all_emails), batch_size)]
     
-    # Process batches in parallel
+    # Process batches in parallel with a thread pool
     all_insights = {
-        'PROCESS MISTAKES': [],
-        'FAILURE PATTERNS': [],
-        'COMMON THEMES': []
+        'PROCEDURAL DEVIATIONS': [],
+        'RECURRENCE INDICATORS': [],
+        'SYSTEMIC TRENDS': []
     }
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    # Use a smaller number of workers to avoid overwhelming the system
+    max_workers = min(3, len(batches))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Create a partial function with the total number of batches
         process_batch_partial = partial(process_batch, total_batches=len(batches))
         
@@ -451,40 +702,44 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
             try:
                 section_map = future.result()
                 if section_map:
-                    all_insights["PROCESS MISTAKES"].extend(section_map["PROCESS MISTAKES"].splitlines())
-                    all_insights["FAILURE PATTERNS"].extend(section_map["FAILURE PATTERNS"].splitlines())
-                    all_insights["COMMON THEMES"].extend(section_map["COMMON THEMES"].splitlines())
+                    all_insights["PROCEDURAL DEVIATIONS"].extend(section_map["PROCEDURAL DEVIATIONS"].splitlines())
+                    all_insights["RECURRENCE INDICATORS"].extend(section_map["RECURRENCE INDICATORS"].splitlines())
+                    all_insights["SYSTEMIC TRENDS"].extend(section_map["SYSTEMIC TRENDS"].splitlines())
                     
-                    # Mark unanalyzed emails in this batch as processed
-                    unanalyzed_ids = [id for id, _, _, _ in batch if not include_analyzed]
-                    if unanalyzed_ids:
-                        conn.execute('''
-                            UPDATE emails 
-                            SET is_analyzed = TRUE, analyzed_at = CURRENT_TIMESTAMP 
-                            WHERE id IN ({})
-                        '''.format(','.join('?' * len(unanalyzed_ids))), unanalyzed_ids)
+                    # Mark unanalyzed emails in this batch as processed using a separate connection
+                    try:
+                        thread_conn = duckdb.connect(DB_PATH)
+                        unanalyzed_ids = [id for id, _, _ in batch if not include_analyzed]
+                        if unanalyzed_ids:
+                            thread_conn.execute('''
+                                UPDATE emails 
+                                SET is_analyzed = TRUE, analyzed_at = CURRENT_TIMESTAMP 
+                                WHERE id IN ({})
+                            '''.format(','.join('?' * len(unanalyzed_ids))), unanalyzed_ids)
+                        thread_conn.close()
+                    except Exception as e:
+                        logger.error(f"Error updating email status: {str(e)}")
             except Exception as e:
                 logger.error(f"Error processing batch result: {str(e)}")
-    
+
     # Combine insights from all batches
     combined_insights = {
-        'PROCESS MISTAKES': '\n'.join(all_insights['PROCESS MISTAKES']),
-        'FAILURE PATTERNS': '\n'.join(all_insights['FAILURE PATTERNS']),
-        'COMMON THEMES': '\n'.join(all_insights['COMMON THEMES'])
+        'PROCEDURAL DEVIATIONS': '\n'.join(all_insights['PROCEDURAL DEVIATIONS']),
+        'RECURRENCE INDICATORS': '\n'.join(all_insights['RECURRENCE INDICATORS']),
+        'SYSTEMIC TRENDS': '\n'.join(all_insights['SYSTEMIC TRENDS'])
     }
     
     # Count references to specific emails in the analysis
     email_references = {}
     for section in combined_insights.values():
-        for id in [id for id, _, _, _ in all_emails]:
+        for id in [id for id, _, _ in all_emails]:
             if str(id) in section:
                 email_references[id] = email_references.get(id, 0) + 1
     
     analysis_stats = {
         'total_emails': len(all_emails),
-        'analyzed_emails': len([id for id, _, _, _ in all_emails if not include_analyzed]),
+        'analyzed_emails': len([id for id, _, _ in all_emails if not include_analyzed]),
         'referenced_emails': len(email_references),
-        'date_range': date_range,
         'batches_processed': len(batches),
         'batching_method': 'similarity' if use_similarity_batching else 'chronological'
     }
@@ -493,156 +748,249 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
     
     return {
         'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'process_mistakes': combined_insights['PROCESS MISTAKES'] or 'No process mistakes identified',
-        'failure_patterns': combined_insights['FAILURE PATTERNS'] or 'No failure patterns identified',
-        'common_themes': combined_insights['COMMON THEMES'] or 'No common themes identified',
+        'procedural_deviations': combined_insights['PROCEDURAL DEVIATIONS'] or 'No procedural deviations identified',
+        'recurrence_indicators': combined_insights['RECURRENCE INDICATORS'] or 'No recurrence indicators identified',
+        'systemic_trends': combined_insights['SYSTEMIC TRENDS'] or 'No systemic trends identified',
         'email_count': len(all_emails),
         'analysis_stats': analysis_stats
     }
 
 def clear_emails_table():
     """Clear the emails table and all dependent tables"""
-    global conn
     try:
         # Close current connection
-        conn.close()
+        if 'conn' in st.session_state and st.session_state.conn is not None:
+            st.session_state.conn.close()
+            st.session_state.conn = None
+        
         # Delete the database file to fully clear data and reduce file size
-        import os
-        if os.path.exists(db_path):
-            os.remove(db_path)
-            logger.info(f"Deleted database file {db_path}")
+        if os.path.exists(DB_PATH):  # Use global DB_PATH
+            os.remove(DB_PATH)
+            logger.info(f"Deleted database file {DB_PATH}")
+        
         # Reconnect and reinitialize database
-        conn = duckdb.connect(db_path)
+        st.session_state.conn = duckdb.connect(DB_PATH)  # Use global DB_PATH
         if not init_database():
-            logger.error("!!!!!!!! Failed to reinitialize database after clearing")
+            logger.error("Failed to reinitialize database after clearing")
             return False
+        
         logger.info("Database cleared by deleting file and reinitializing")
         return True
     except Exception as e:
-        logger.error(f"!!!!!!!!Error clearing database: {str(e)}")
+        logger.error(f"Error clearing database: {str(e)}")
         return False
 
-def get_email_context(limit=50):
-    """Get context from recent emails for RAG"""
-    query = '''
-        SELECT id, email_text_body, email_subject, created_at
-        FROM emails
-        ORDER BY created_at DESC
-        LIMIT ?
-    '''
-    emails = conn.execute(query, [limit]).fetchall()
-    
-    context = "Recent maintenance and service emails:\n"
-    for id, text_body, subject, created_at in emails:
-        context += f"\nEmail {id} ({created_at.strftime('%Y-%m-%d')}):\nSubject: {subject}\nBody: {text_body}\n"
-    
-    return context
-
-def query_llm_with_context(query_text, context):
-    """Query LLM with email context using RAG approach"""
-    # Check cache first
-    cached_response = get_cached_query(query_text, len(context.split('\n')))
-    if cached_response:
-        logger.info("Using cached query result")
-        return cached_response
-
-    # Get similar emails using embeddings
-    similar_emails = get_similar_emails(query_text)
-    if similar_emails:
-        context += "\n\nMost relevant emails:\n"
-        for id, subject, text, similarity in similar_emails:
-            context += f"\nEmail {id} (Relevance: {similarity:.2f}):\nSubject: {subject}\nBody: {text}\n"
-
-    prompt = f"""You are an expert at analyzing maintenance and service-related emails. Use the following context to answer the user's question.
-
-    Context:
-    {context}
-
-    User Question: {query_text}
-
-    Instructions:
-    1. Use ONLY the information from the provided context
-    2. If the context doesn't contain relevant information, say so
-    3. Reference specific email IDs when making points
-    4. Be specific and detailed in your response
-    5. Format your response in clear paragraphs with bullet points where appropriate
-
-    Response:"""
-
+def get_total_analyzed_emails():
+    """Get the total number of analyzed emails"""
     try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": "You are an expert at analyzing maintenance and service-related emails. Use the provided context to answer questions accurately and specifically."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=2000
-        )
-        response_text = response.choices[0].message.content
-        
-        # Cache the result
-        cache_query_result(query_text, response_text, len(context.split('\n')))
-        
-        return response_text
+        conn = get_db_connection()
+        result = conn.execute("""
+            SELECT COUNT(*) 
+            FROM emails 
+            WHERE is_analyzed = TRUE
+        """).fetchone()[0]
+        return result
     except Exception as e:
-        logger.error(f"Error querying LLM: {str(e)}")
-        return f"Error generating response: {str(e)}"
+        logger.error(f"Error getting total analyzed emails: {str(e)}")
+        return 0
 
-def get_cached_query(query_text, context_size):
-    """Get cached query result if available"""
+def determine_relevant_categories(query_text):
+    """Determine which analysis categories are relevant to the user's query"""
+    query_lower = query_text.lower()
+    
+    # Define category keywords
+    category_keywords = {
+        'procedural_deviations': [
+            'procedure', 'process', 'protocol', 'deviation', 'mistake', 'error',
+            'procedure', 'step', 'method', 'approach', 'guideline', 'standard',
+            'violation', 'breach', 'non-compliance', 'procedure', 'process'
+        ],
+        'recurrence_indicators': [
+            'recur', 'repeat', 'pattern', 'frequency', 'often', 'repeatedly',
+            'recurring', 'consistent', 'regular', 'cycle', 'trend', 'pattern',
+            'frequent', 'repetitive', 'recurring', 'repeated'
+        ],
+        'systemic_trends': [
+            'system', 'trend', 'overall', 'general', 'broad', 'widespread',
+            'systemic', 'across', 'throughout', 'common', 'universal', 'global',
+            'trend', 'pattern', 'theme', 'systemic'
+        ]
+    }
+    
+    # Count keyword matches for each category
+    category_scores = {
+        'procedural_deviations': sum(1 for word in category_keywords['procedural_deviations'] if word in query_lower),
+        'recurrence_indicators': sum(1 for word in category_keywords['recurrence_indicators'] if word in query_lower),
+        'systemic_trends': sum(1 for word in category_keywords['systemic_trends'] if word in query_lower)
+    }
+    
+    # If no specific category is detected, return all categories
+    if sum(category_scores.values()) == 0:
+        return ['procedural_deviations', 'recurrence_indicators', 'systemic_trends']
+    
+    # Return categories that have at least one keyword match
+    return [category for category, score in category_scores.items() if score > 0]
+
+def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_quality=0.5):
+    """Get context from analyzed emails for RAG using their analysis summaries"""
     try:
+        # Get database connection
+        conn = get_db_connection()
+        
+        # Log the incoming parameters
+        logger.info(f"Getting email context - Query: '{query_text}', Limit: {limit}, Days back: {days_back}")
+        
+        # Calculate date threshold
+        date_threshold = datetime.now() - timedelta(days=days_back)
+        
+        # Determine which categories are relevant to the query
+        relevant_categories = determine_relevant_categories(query_text) if query_text else [
+            'procedural_deviations', 'recurrence_indicators', 'systemic_trends'
+        ]
+        
+        # Build dynamic SELECT clause based on relevant categories
+        select_clause = ', '.join([
+            f"COALESCE({category}, '') as {category}"
+            for category in relevant_categories
+        ])
+        
+        # Get analyzed emails with their analysis results within date range
+        query = f'''
+            WITH ranked_emails AS (
+                SELECT 
+                    ar.email_id,
+                    ar.analysis_date,
+                    {select_clause},
+                    -- Calculate analysis quality based on content length and category coverage
+                    (
+                        LENGTH(COALESCE(procedural_deviations, '')) +
+                        LENGTH(COALESCE(recurrence_indicators, '')) +
+                        LENGTH(COALESCE(systemic_trends, ''))
+                    ) / 3.0 as analysis_quality
+                FROM analysis_results_new ar
+                WHERE ar.analysis_date >= ?
+                ORDER BY ar.analysis_date DESC
+            )
+            SELECT * FROM ranked_emails
+            WHERE analysis_quality >= ?
+            LIMIT ?
+        '''
+        results = conn.execute(query, [date_threshold, min_analysis_quality, MAX_EMAILS_PER_CONTEXT]).fetchall()
+        
+        if not results:
+            return f"No analyzed emails found in the last {days_back} days with sufficient analysis quality.", 0
+        
+        # Get email subjects in a separate query
+        email_ids = [r[0] for r in results]
+        subjects = {id: subject for id, subject in conn.execute(
+            'SELECT id, email_subject FROM emails WHERE id IN ({})'.format(
+                ','.join('?' * len(email_ids))
+            ), email_ids).fetchall()}
+        
+        # Process results with increased context size
+        total_chars = 0
+        used_emails = set()
+        context_parts = []
+        
+        for email_id, analysis_date, *analysis_values in results:
+            if email_id in used_emails or total_chars >= MAX_CONTEXT_SIZE:
+                break
+                
+            subject = subjects.get(email_id, "Subject not found")
+            analysis_summary = []
+            
+            for category, value in zip(relevant_categories, analysis_values):
+                if value:
+                    display_name = ' '.join(word.capitalize() for word in category.split('_'))
+                    analysis_summary.append(f"{display_name}: {value}")
+            
+            if analysis_summary:
+                email_content = f"Email {email_id} (Analyzed: {analysis_date}):\nSubject: {subject}\nAnalysis: {' | '.join(analysis_summary)}"
+                email_size = len(email_content)
+                
+                if total_chars + email_size <= MAX_CONTEXT_SIZE:
+                    used_emails.add(email_id)
+                    context_parts.append(email_content)
+                    total_chars += email_size
+        
+        # Build final context
+        categories_str = ', '.join(category.replace('_', ' ').title() for category in relevant_categories)
+        context = f"Analyzed email summaries (showing {len(used_emails)} emails, {total_chars} chars)\n"
+        context += f"Categories included: {categories_str}\n"
+        context += f"Analysis period: Last {days_back} days\n"
+        context += "\n".join(context_parts)
+        
+        logger.info(f"Context summary: {len(used_emails)} emails, {total_chars} chars")
+        return context, len(used_emails)
+        
+    except Exception as e:
+        logger.error(f"Error getting email context: {str(e)}")
+        return "Error retrieving email context. Please check the logs for details.", 0
+
+def get_cached_query(query_text, context_size, model_name):
+    """Get cached query result if available and not expired"""
+    try:
+        conn = get_db_connection()
+        # Add cache expiration (24 hours)
+        cache_expiry = datetime.now() - timedelta(hours=24)
+        
         result = conn.execute('''
-            SELECT response_text, access_count
+            SELECT response_text, access_count, created_at
             FROM query_cache
-            WHERE query_text = ? AND context_size = ?
+            WHERE query_text = ? 
+            AND context_size = ?
+            AND model_used = ?
+            AND created_at > ?
             ORDER BY last_accessed DESC
             LIMIT 1
-        ''', (query_text, context_size)).fetchone()
+        ''', (query_text, context_size, model_name, cache_expiry)).fetchone()
         
         if result:
+            response_text, access_count, created_at = result
             # Update access count and last accessed time
             conn.execute('''
                 UPDATE query_cache
                 SET access_count = access_count + 1,
                     last_accessed = CURRENT_TIMESTAMP
-                WHERE query_text = ? AND context_size = ?
-            ''', (query_text, context_size))
-            return result[0]
+                WHERE query_text = ? AND context_size = ? AND model_used = ?
+            ''', (query_text, context_size, model_name))
+            return response_text
     except Exception as e:
         logger.error(f"Error retrieving cached query: {str(e)}")
     return None
 
-def cache_query_result(query_text, response_text, context_size):
-    """Cache query result"""
+def cache_query_result(query_text, response_text, context_size, model_name):
+    """Cache query result with model information"""
     try:
+        conn = get_db_connection()
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM query_cache").fetchone()[0]
         
         conn.execute('''
-            INSERT INTO query_cache (id, query_text, response_text, context_size)
-            VALUES (?, ?, ?, ?)
-        ''', (next_id, query_text, response_text, context_size))
-        logger.info(f"Cached query result for: {query_text[:50]}...")
+            INSERT INTO query_cache (id, query_text, response_text, context_size, model_used)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (next_id, query_text, response_text, context_size, model_name))
+        logger.info(f"Cached query result for: {query_text[:50]}... using model {model_name}")
     except Exception as e:
         logger.error(f"Error caching query result: {str(e)}")
 
-def store_analysis_results(email_id, process_mistakes, failure_patterns, common_themes):
+def store_analysis_results(email_id, procedural_deviations, recurrence_indicators, systemic_trends):
     """Store LLM analysis results in database"""
     try:
+        conn = get_db_connection()
         # Defensive check to convert None to empty string
-        pm = process_mistakes if process_mistakes is not None else ""
-        fp = failure_patterns if failure_patterns is not None else ""
-        ct = common_themes if common_themes is not None else ""
+        pd = procedural_deviations if procedural_deviations is not None else ""
+        ri = recurrence_indicators if recurrence_indicators is not None else ""
+        st = systemic_trends if systemic_trends is not None else ""
 
         # Get the next available ID
-        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM analysis_results").fetchone()[0]
+        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM analysis_results_new").fetchone()[0]
         
         conn.execute('''
-            INSERT INTO analysis_results 
-            (id, email_id, process_mistakes, failure_patterns, common_themes)
+            INSERT INTO analysis_results_new 
+            (id, email_id, procedural_deviations, recurrence_indicators, systemic_trends)
             VALUES (?, ?, ?, ?, ?)
-        ''', (next_id, email_id, pm, fp, ct))
+        ''', (next_id, email_id, pd, ri, st))
         logger.info(f"Stored analysis results for email {email_id}")
         return True
     except Exception as e:
@@ -652,6 +1000,7 @@ def store_analysis_results(email_id, process_mistakes, failure_patterns, common_
 def get_similar_emails(query_text, limit=5):
     """Get similar emails using TF-IDF and cosine similarity"""
     try:
+        conn = get_db_connection()
         # Get all emails
         emails = conn.execute('''
             SELECT id, email_subject, email_text_body
@@ -685,10 +1034,72 @@ def get_similar_emails(query_text, limit=5):
         logger.error(f"Error finding similar emails: {str(e)}")
         return []
 
+def query_llm_with_context(query_text, context, model_name='groq'):
+    """
+    Query the LLM with email context using the specified model.
+    
+    Args:
+        query_text (str): The user's query
+        context (str): The email context to use for answering
+        model_name (str): The model to use ('groq' or 'deepseek')
+        
+    Returns:
+        str: The LLM's response
+    """
+    try:
+        # Get model config using the appropriate function
+        model_config_fn = QUERY_MODEL_CONFIGS.get(model_name)
+        if not model_config_fn:
+            raise ValueError(f"Invalid model name: {model_name}")
+        
+        # Get fresh model config
+        model_config = model_config_fn()
+        
+        # Check cache first
+        cached_response = get_cached_query(query_text, len(context.split('\n')), model_name)
+        if cached_response:
+            logger.info(f"Using cached response for query with model {model_name}")
+            return cached_response
+
+        # Prepare the prompt with context
+        messages = [
+            {"role": "system", "content": """You are an expert at analyzing maintenance and service-related emails. 
+            Your task is to answer questions about these emails based on the provided context.
+            Guidelines:
+            1. Base your answers ONLY on the information provided in the context
+            2. If the context doesn't contain relevant information, say so
+            3. Be specific and cite email IDs when referencing particular emails
+            4. Keep responses concise but informative
+            5. Focus on actionable insights and patterns
+            6. If you notice any critical issues, highlight them
+            7. Format your response in clear, readable sections if appropriate"""},
+            {"role": "user", "content": f"""Context from analyzed emails:
+            {context}
+            
+            Question: {query_text}
+            
+            Please provide a clear, concise answer based on the email context above."""}
+        ]
+
+        # Get response from selected model
+        logger.info(f"Querying {model_name} with context")
+        if model_name == 'groq':
+            response = get_groq_response(messages, model_config)
+        else:  # deepseek
+            response = get_deepseek_response(messages, model_config)
+        
+        # Cache the response
+        cache_query_result(query_text, response, len(context.split('\n')), model_name)
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error querying LLM with context: {str(e)}")
+        return f"Error processing your query: {str(e)}"
+
 def get_db_size():
     """Get the current size of the database file"""
     try:
-        if os.path.exists(db_path):
+        if os.path.exists(DB_PATH):  # Use global DB_PATH
             # Force a flush and checkpoint of any pending writes
             if 'conn' in st.session_state and st.session_state.conn is not None:
                 try:
@@ -704,11 +1115,10 @@ def get_db_size():
             time.sleep(0.1)
             
             # Get the file size
-            size_bytes = os.path.getsize(db_path)
+            size_bytes = os.path.getsize(DB_PATH)  # Use global DB_PATH
             
             # Reconnect after getting size
-            conn = duckdb.connect(db_path)
-            st.session_state.conn = conn
+            st.session_state.conn = duckdb.connect(DB_PATH)  # Use global DB_PATH
             
             return size_bytes
         return 0
@@ -769,19 +1179,18 @@ with col1:
         - Total Emails: {stats.get('total_emails', 0)}
         - Emails Analyzed: {stats.get('analyzed_emails', 0)}
         - Emails Referenced: {stats.get('referenced_emails', 0)}
-        - Date Range: {stats.get('date_range', 'N/A')}
         - Batches Processed: {stats.get('batches_processed', 0)}
         - Batching Method: {stats.get('batching_method', 'N/A')}
         """)
         
-        with st.expander("Process Mistakes", expanded=True):
-            st.write(st.session_state['insights']['process_mistakes'])
+        with st.expander("Procedural Deviations", expanded=True):
+            st.write(st.session_state['insights']['procedural_deviations'])
         
-        with st.expander("Failure Patterns", expanded=True):
-            st.write(st.session_state['insights']['failure_patterns'])
+        with st.expander("Recurrence Indicators", expanded=True):
+            st.write(st.session_state['insights']['recurrence_indicators'])
         
-        with st.expander("Common Themes", expanded=True):
-            st.write(st.session_state['insights']['common_themes'])
+        with st.expander("Systemic Trends", expanded=True):
+            st.write(st.session_state['insights']['systemic_trends'])
 
 # Middle Column - Data Management
 with col2:
@@ -830,11 +1239,11 @@ with col2:
                 SELECT 
                     ar.email_id,
                     e.email_subject,
-                    ar.process_mistakes,
-                    ar.failure_patterns,
-                    ar.common_themes,
+                    ar.procedural_deviations,
+                    ar.recurrence_indicators,
+                    ar.systemic_trends,
                     ar.analysis_date
-                FROM analysis_results ar
+                FROM analysis_results_new ar
                 JOIN emails e ON ar.email_id = e.id
                 ORDER BY ar.analysis_date DESC
             '''
@@ -848,9 +1257,9 @@ with col2:
                 analysis_results = analysis_results.rename(columns={
                     'email_id': 'Email ID',
                     'email_subject': 'Subject',
-                    'process_mistakes': 'Process Mistakes',
-                    'failure_patterns': 'Failure Patterns',
-                    'common_themes': 'Common Themes',
+                    'procedural_deviations': 'Procedural Deviations',
+                    'recurrence_indicators': 'Recurrence Indicators',
+                    'systemic_trends': 'Systemic Trends',
                     'analysis_date': 'Analysis Date'
                 })
 
@@ -866,66 +1275,133 @@ with col2:
 with col3:
     st.subheader('🤖 AI Query Interface')
     
-    # Query input
-    query = st.text_area(
-        label="Ask a question about the emails",
-        height=100,
-        placeholder="Example: What are the most common maintenance issues reported?",
-        key="rag_query"
-    )
+    # Create a container for model selection with a border
+    with st.container():
+        st.markdown("### Model Selection")
+        model_choice = st.radio(
+            "Select Query Model",
+            options=['groq', 'deepseek'],
+            format_func=lambda x: 'Groq (Fast)' if x == 'groq' else 'DeepSeek (High Quality)',
+            help="Groq is faster but DeepSeek may provide more detailed analysis",
+            horizontal=True  # Make it horizontal for better space usage
+        )
+        
+        # Show model details in an expander
+        with st.expander("Model Details", expanded=False):
+            if model_choice == 'groq':
+                st.markdown(f"**Current Model:** {GROQ_MODEL}")
+                st.markdown("**Features:**")
+                st.markdown("- Fast response times")
+                st.markdown("- Good for quick analysis")
+                st.markdown("- Suitable for most queries")
+            else:
+                st.markdown(f"**Current Model:** {DEEPSEEK_MODEL}")
+                st.markdown("**Features:**")
+                st.markdown("- High-quality responses")
+                st.markdown("- Better for complex analysis")
+                st.markdown("- More detailed insights")
     
-    # Context size control
-    context_size = st.slider(
-        "Number of recent emails to consider",
-        min_value=10,
-        max_value=100,
-        value=50,
-        step=10,
-        help="Adjust how many recent emails to include in the context"
-    )
+    # Create a container for query input with a border
+    with st.container():
+        st.markdown("### Query Input")
+        query = st.text_area(
+            label="Ask a question about the emails",
+            height=100,
+            placeholder="Example: What are the most common maintenance issues reported?",
+            key="rag_query"
+        )
+        
+        # Get total analyzed emails for dynamic slider
+        total_analyzed = get_total_analyzed_emails()
+        max_emails = max(total_analyzed, 100)  # At least 100, or total analyzed if higher
+        
+        # Context size control with dynamic limits
+        st.markdown("### Context Settings")
+        col3_1, col3_2 = st.columns(2)
+        with col3_1:
+            context_size = st.slider(
+                "Number of recent emails",
+                min_value=5,
+                max_value=max_emails,
+                value=min(20, max_emails),
+                step=5,
+                help="How many recent emails to include in the context"
+            )
+        with col3_2:
+            days_back = st.slider(
+                "Days to look back",
+                min_value=1,
+                max_value=90,
+                value=30,
+                step=1,
+                help="How far back to look for relevant emails"
+            )
     
-    if st.button('🔍 Query Emails'):
-        if query:
-            with st.spinner('Analyzing emails...'):
-                # Get context from recent emails
-                context = get_email_context(context_size)
-                
-                # Query LLM with context
-                response = query_llm_with_context(query, context)
-                
-                # Store in session state
-                st.session_state['last_query'] = {
-                    'query': query,
-                    'response': response,
-                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
-        else:
-            st.warning('Please enter a question to analyze.')
+    # Query button in its own container
+    with st.container():
+        if st.button('🔍 Analyze Emails', use_container_width=True):
+            if query:
+                with st.spinner(f'Analyzing emails using {model_choice}...'):
+                    # Get context from analyzed emails
+                    context, num_emails = get_email_context(context_size, query, days_back=days_back)
+                    
+                    # Show context information in an expander
+                    with st.expander("Context Information", expanded=False):
+                        st.info(f"Using {num_emails} emails for context (requested: {context_size})")
+                        st.markdown(f"Total analyzed emails available: {total_analyzed}")
+                    
+                    # Query LLM with context and selected model
+                    response = query_llm_with_context(query, context, model_choice)
+                    
+                    # Store in session state
+                    st.session_state['last_query'] = {
+                        'query': query,
+                        'response': response,
+                        'model': model_choice,
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'context_size': len(context.split('\n')),
+                        'requested_size': context_size,
+                        'total_available': total_analyzed,
+                        'num_emails_used': num_emails,
+                        'days_back': days_back
+                    }
+            else:
+                st.warning('Please enter a question to analyze.')
     
-    # Display last query result
+    # Display last query result in a clean container
     if 'last_query' in st.session_state:
-        st.markdown(f"**Last Query:** {st.session_state['last_query']['timestamp']}")
-        st.markdown("### Question")
-        st.write(st.session_state['last_query']['query'])
-        st.markdown("### Response")
-        st.write(st.session_state['last_query']['response'])
+        with st.container():
+            st.markdown("### Analysis Results")
+            
+            # Query details in an expander
+            with st.expander("Query Details", expanded=False):
+                st.markdown(f"**Timestamp:** {st.session_state['last_query']['timestamp']}")
+                st.markdown(f"**Model Used:** {st.session_state['last_query']['model'].upper()}")
+                st.markdown(f"**Context:** {st.session_state['last_query']['num_emails_used']} emails, {st.session_state['last_query']['days_back']} days back")
+            
+            # Display the query and response in a clean format
+            st.markdown("#### Question")
+            st.markdown(f"_{st.session_state['last_query']['query']}_")
+            
+            st.markdown("#### Response")
+            st.markdown(st.session_state['last_query']['response'])
 
-# Footer with metrics
+# Footer with metrics - make it more compact
 st.markdown("---")
-st.markdown("### 📈 Dashboard Status")
-status_col1, status_col2, status_col3 = st.columns(3)
+st.markdown("### 📊 Dashboard Status")
+status_col1, status_col2, status_col3, status_col4 = st.columns(4)
 
 with status_col1:
     try:
-        # Ensure we have a valid connection
         conn = get_db_connection()
         if conn:
             try:
                 count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-                st.metric("Total Emails", count)
+                analyzed = conn.execute("SELECT COUNT(*) FROM emails WHERE is_analyzed = TRUE").fetchone()[0]
+                st.metric("Total Emails", count, f"{analyzed} analyzed")
             except Exception as e:
                 if "Table with name emails does not exist" in str(e):
-                    st.metric("Total Emails", "0")
+                    st.metric("Total Emails", "0", "0 analyzed")
                 else:
                     logger.error(f"Error getting email count: {str(e)}")
                     st.metric("Total Emails", "Error")
@@ -939,45 +1415,86 @@ with status_col2:
     st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
 
 with status_col3:
-    if st.button('📋 Show Table'):
+    if st.button('📋 View Emails', use_container_width=True):
         try:
-            # Get all emails with their analysis status
+            conn = get_db_connection()
             query = '''
                 SELECT 
                     e.id,
                     e.email_subject,
-                    e.email_from,
-                    e.email_to,
-                    e.created_at,
+                    e.email_text_body,
                     e.is_analyzed,
                     e.analyzed_at
                 FROM emails e
-                ORDER BY e.created_at DESC
+                ORDER BY e.id DESC
             '''
             emails = conn.execute(query).fetchdf()
             
             if not emails.empty:
                 # Format the dataframe for display
-                emails['created_at'] = emails['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
                 emails['analyzed_at'] = emails['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
                 emails['is_analyzed'] = emails['is_analyzed'].map({True: '✅', False: '❌'})
+                emails['email_text_body'] = emails['email_text_body'].apply(
+                    lambda x: x[:100] + '...' if len(str(x)) > 100 else x
+                )
                 
-                # Rename columns for better display
+                # Rename and reorder columns
                 emails = emails.rename(columns={
                     'id': 'ID',
                     'email_subject': 'Subject',
-                    'email_from': 'From',
-                    'email_to': 'To',
-                    'created_at': 'Created',
+                    'email_text_body': 'Body Preview',
                     'is_analyzed': 'Analyzed',
                     'analyzed_at': 'Analyzed At'
                 })
                 
-                # Display the table
-                st.dataframe(emails, use_container_width=True)
+                # Display with better formatting
+                st.dataframe(
+                    emails[['ID', 'Subject', 'Body Preview', 'Analyzed', 'Analyzed At']],
+                    use_container_width=True,
+                    column_config={
+                        "Body Preview": st.column_config.TextColumn(
+                            "Body Preview",
+                            width="large",
+                            help="First 100 characters of the email body"
+                        ),
+                        "Subject": st.column_config.TextColumn(
+                            "Subject",
+                            width="medium"
+                        ),
+                        "ID": st.column_config.NumberColumn(
+                            "ID",
+                            width="small"
+                        ),
+                        "Analyzed": st.column_config.TextColumn(
+                            "Analyzed",
+                            width="small"
+                        ),
+                        "Analyzed At": st.column_config.TextColumn(
+                            "Analyzed At",
+                            width="medium"
+                        )
+                    }
+                )
             else:
                 st.info("No emails found in the database.")
         except Exception as e:
             logger.error(f"Error displaying table: {str(e)}")
             st.error("Error displaying table. Please check the logs for details.")
+
+with status_col4:
+    if st.button('🤖 Model Info', use_container_width=True):
+        with st.expander("Available Models", expanded=True):
+            # Show DeepSeek models
+            st.markdown("**DeepSeek Models:**")
+            deepseek_models = get_available_deepseek_models()
+            if deepseek_models:
+                for model in sorted(deepseek_models):
+                    st.markdown(f"- {model}")
+                st.markdown(f"**Current:** {DEEPSEEK_MODEL}")
+            else:
+                st.error("Could not fetch DeepSeek models")
+            
+            # Show Groq model
+            st.markdown("**Groq Model:**")
+            st.markdown(f"- {GROQ_MODEL}")
 

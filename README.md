@@ -1,7 +1,16 @@
 # Email Analysis Dashboard
 
 This Streamlit application provides an interface to store and analyze email data using DuckDB and DeepSeek LLM. It helps track maintenance information and failure patterns from email content using advanced AI analysis.
-
+streamlit==1.32.0
+duckdb==0.10.0
+polars==0.20.5
+python-dateutil
+openai>=0.27.0
+python-dotenv==1.0.1
+numpy==1.26.4
+sentence-transformers==2.5.1
+httpx
+opensearch-py==2.1.0
 ## Features
 
 - Store email data in a DuckDB database
