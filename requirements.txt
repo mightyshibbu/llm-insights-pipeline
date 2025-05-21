@@ -7,4 +7,7 @@ python-dotenv
 numpy
 sentence-transformers
 httpx
-together
+beautifulsoup4 
+lxml 
+html2text
+groq

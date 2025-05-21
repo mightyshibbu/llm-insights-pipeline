@@ -14,6 +14,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 import concurrent.futures
 from functools import partial
 import time
+import re
+from bs4 import BeautifulSoup
+import html2text
+from typing import Dict, Any
 
 # Configure logging
 logging.basicConfig(
@@ -73,6 +77,14 @@ ANALYSIS_MODEL_CONFIG = {
 # Add at the top with other global variables
 DB_PATH = 'emails.db'  # Define database path globally
 
+# Add after the existing model configurations
+INCIDENT_CATEGORIES = [
+    "Temperature", "Pressure", "Mechanical", "Fluid Leak", 
+    "Safety", "Electrical", "Others"
+]
+
+SEVERITY_LEVELS = ["Low", "Medium", "High"]
+
 def get_db_connection():
     """Get or create database connection"""
     if 'conn' not in st.session_state:
@@ -80,55 +92,70 @@ def get_db_connection():
     return st.session_state.conn
 
 def init_database():
-    """Initialize database tables"""
+    """Initialize database tables if they don't exist"""
     try:
         # Start a transaction
         conn = get_db_connection()
         conn.execute("BEGIN TRANSACTION")
         
         try:
-            # Create emails table with only essential columns
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS emails (
-                    id INTEGER PRIMARY KEY,
-                    email_subject VARCHAR,
-                    email_text_body TEXT,
-                    is_analyzed BOOLEAN DEFAULT FALSE,
-                    analyzed_at TIMESTAMP DEFAULT NULL
-                )
-            ''')
+            # Check if tables exist before creating them
+            tables_exist = conn.execute("""
+                SELECT COUNT(*) 
+                FROM information_schema.tables 
+                WHERE table_name IN ('emails', 'analysis_results_new', 'query_cache')
+            """).fetchone()[0] > 0
 
-            # Create analysis results table with new column names
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS analysis_results_new (
-                    id INTEGER PRIMARY KEY,
-                    email_id INTEGER,
-                    procedural_deviations TEXT,
-                    recurrence_indicators TEXT,
-                    systemic_trends TEXT,
-                    analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (email_id) REFERENCES emails(id)
-                )
-            ''')
+            if not tables_exist:
+                logger.info("Creating new database tables")
+                # Create emails table with enhanced columns
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS emails (
+                        id INTEGER PRIMARY KEY,
+                        email_subject VARCHAR,
+                        email_text_body TEXT,
+                        email_to VARCHAR,
+                        email_from VARCHAR,
+                        incident_type VARCHAR,
+                        severity VARCHAR,
+                        is_analyzed BOOLEAN DEFAULT FALSE,
+                        analyzed_at TIMESTAMP DEFAULT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
 
-            # Drop and recreate query cache table with model information
-            conn.execute('DROP TABLE IF EXISTS query_cache')
-            conn.execute('''
-                CREATE TABLE query_cache (
-                    id INTEGER PRIMARY KEY,
-                    query_text TEXT,
-                    response_text TEXT,
-                    context_size INTEGER,
-                    model_used VARCHAR,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    access_count INTEGER DEFAULT 0
-                )
-            ''')
+                # Create analysis results table
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS analysis_results_new (
+                        id INTEGER PRIMARY KEY,
+                        email_id INTEGER,
+                        procedural_deviations TEXT,
+                        recurrence_indicators TEXT,
+                        systemic_trends TEXT,
+                        analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (email_id) REFERENCES emails(id)
+                    )
+                ''')
+
+                # Create query cache table
+                conn.execute('''
+                    CREATE TABLE IF NOT EXISTS query_cache (
+                        id INTEGER PRIMARY KEY,
+                        query_text TEXT,
+                        response_text TEXT,
+                        context_size INTEGER,
+                        model_used VARCHAR,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        access_count INTEGER DEFAULT 0
+                    )
+                ''')
+                logger.info("Database tables created successfully")
+            else:
+                logger.info("Database tables already exist, preserving data")
             
             # Commit the transaction
             conn.execute("COMMIT")
-            logger.info("Database schema initialized successfully")
             return True
             
         except Exception as e:
@@ -408,11 +435,167 @@ def select_model(query_type, query_text=None):
         return ANALYSIS_MODEL_CONFIG['small'].copy()  # Return a copy to avoid modifying the original
     return ANALYSIS_MODEL_CONFIG['large'].copy()  # Return a copy to avoid modifying the original
 
+
+def clean_html_to_text(html):
+    # Parse HTML and remove script/style
+    soup = BeautifulSoup(html, 'lxml')
+    for tag in soup(['script', 'style', 'head', 'title', 'meta', '[document]']):
+        tag.extract()
+    # Get full text with line breaks
+    text = soup.get_text(separator="\n")
+    # Optionally, also try html2text for better formatting:
+    # text = html2text.html2text(html)
+    
+    # Split into lines and trim
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    
+    # Filter out common boilerplate/disclaimer lines
+    stop_keywords = [
+        r"confidentiality notice", r"not intended recipient", 
+        r"unauthorized", r"unsubscribe", r"copyright", r"disclaimer"
+    ]
+    filtered = []
+    for line in lines:
+        low = line.lower()
+        if any(re.search(kw, low) for kw in stop_keywords):
+            # Stop processing further if it's the start of a footer
+            break
+        filtered.append(line)
+    
+    # Re-join into clean text
+    return "\n".join(filtered)
+
+def analyze_email_content(subject: str, body: str) -> Dict[str, Any]:
+    """Use LLM to analyze email content and extract incident type and severity"""
+    try:
+        # Prepare a more detailed prompt for the LLM
+        prompt = f"""Analyze this maintenance/service email and categorize it according to the incident type and severity.
+
+        Email Subject: {subject}
+        Email Body: {body}
+
+        Guidelines for categorization:
+
+        INCIDENT TYPES (choose ONE most relevant):
+        - Temperature: Issues related to temperature control, heating, cooling, thermal systems
+        - Pressure: Pressure-related issues, pressure vessels, pressure control systems
+        - Mechanical: Mechanical failures, equipment breakdowns, moving parts, structural issues
+        - Fluid Leak: Any type of fluid leakage, spills, containment issues
+        - Safety: Safety concerns, hazards, compliance issues, emergency situations
+        - Electrical: Electrical systems, power issues, electrical equipment failures
+        - Others: Any issue that doesn't fit the above categories
+
+        SEVERITY LEVELS (choose ONE):
+        - High: Critical issues requiring immediate attention, safety hazards, system failures
+          Examples: Active leaks, electrical hazards, safety violations, critical system failures
+        - Medium: Issues that need attention but aren't critical
+          Examples: Non-critical equipment malfunctions, maintenance needs, performance issues
+        - Low: Routine maintenance, non-urgent issues, general inquiries
+          Examples: Regular maintenance requests, minor issues, general questions
+
+        Please analyze and respond in EXACTLY this format:
+        INCIDENT_TYPE: [Choose ONE from: {', '.join(INCIDENT_CATEGORIES)}]
+        SEVERITY: [Choose ONE from: {', '.join(SEVERITY_LEVELS)}]
+        REASONING: [Brief explanation for your classification, citing specific details from the email]
+
+        Important:
+        1. Be specific in your reasoning
+        2. Cite actual details from the email
+        3. Consider both subject and body content
+        4. If multiple issues exist, choose the most critical one
+        5. Use EXACTLY the format shown above"""
+
+        # Use DeepSeek for analysis with lower temperature for more consistent results
+        model_config = select_model('complex_analysis')
+        model_config['temperature'] = 0.2  # Lower temperature for more consistent categorization
+        model_config['max_tokens'] = min(model_config['max_tokens'], 500)
+        
+        response = get_deepseek_response(
+            messages=[
+                {"role": "system", "content": """You are an expert at analyzing maintenance and service-related emails. 
+                Your task is to accurately categorize incidents and assess their severity.
+                You MUST:
+                1. Follow the exact format specified
+                2. Choose the most appropriate category based on the actual content
+                3. Provide specific reasoning from the email
+                4. Be conservative in severity assessment - only mark as High if truly critical
+                5. Consider both immediate and potential impacts"""},
+                {"role": "user", "content": prompt}
+            ],
+            model_config=model_config
+        )
+
+        # Parse the structured response using regex
+        incident_type_match = re.search(r'INCIDENT_TYPE:\s*([A-Za-z\s]+)', response)
+        severity_match = re.search(r'SEVERITY:\s*([A-Za-z\s]+)', response)
+        reasoning_match = re.search(r'REASONING:\s*(.+?)(?=\n|$)', response, re.DOTALL)
+
+        if not all([incident_type_match, severity_match, reasoning_match]):
+            logger.error(f"Failed to parse LLM response: {response}")
+            # Try to extract any useful information even if format isn't perfect
+            incident_type = 'Others'
+            severity = 'Low'
+            reasoning = 'Failed to parse analysis'
+            
+            # Look for any mention of incident types in the response
+            for category in INCIDENT_CATEGORIES:
+                if category.lower() in response.lower():
+                    incident_type = category
+                    break
+            
+            # Look for any mention of severity levels
+            for level in SEVERITY_LEVELS:
+                if level.lower() in response.lower():
+                    severity = level
+                    break
+        else:
+            incident_type = incident_type_match.group(1).strip()
+            severity = severity_match.group(1).strip()
+            reasoning = reasoning_match.group(1).strip()
+
+            # Validate the extracted values
+            if incident_type not in INCIDENT_CATEGORIES:
+                # Try to find the closest matching category
+                for category in INCIDENT_CATEGORIES:
+                    if category.lower() in incident_type.lower():
+                        incident_type = category
+                        break
+                else:
+                    incident_type = 'Others'
+            
+            if severity not in SEVERITY_LEVELS:
+                # Try to find the closest matching severity
+                for level in SEVERITY_LEVELS:
+                    if level.lower() in severity.lower():
+                        severity = level
+                        break
+                else:
+                    severity = 'Low'
+
+        logger.info(f"Email analysis - Type: {incident_type}, Severity: {severity}")
+        logger.info(f"Reasoning: {reasoning}")
+
+        return {
+            'incident_type': incident_type,
+            'severity': severity,
+            'reasoning': reasoning
+        }
+
+    except Exception as e:
+        logger.error(f"Error analyzing email content: {str(e)}")
+        return {
+            'incident_type': 'Others',
+            'severity': 'Low',
+            'reasoning': f'Error in analysis: {str(e)}'
+        }
+
 def store_email(email_data):
-    """Store email in database"""
+    """Store email in database with enhanced analysis"""
     try:
         email = email_data['Email']
-        text_body = email['TextBody'][0] if isinstance(email['TextBody'], list) else email['TextBody']
+        # Extract HTML and convert to clean text
+        html_body = email.get('HtmlBody', '')
+        text_body = clean_html_to_text(html_body)
         
         # Get database connection
         conn = get_db_connection()
@@ -420,18 +603,27 @@ def store_email(email_data):
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM emails").fetchone()[0]
         
-        # Only store essential information
+        # Analyze email content using LLM
+        analysis = analyze_email_content(email['Subject'], text_body)
+        
+        # Store the email with all fields
         conn.execute('''
             INSERT INTO emails (
-                id, email_subject, email_text_body, is_analyzed
-            ) VALUES (?, ?, ?, FALSE)
+                id, email_subject, email_text_body, email_to, email_from,
+                incident_type, severity, is_analyzed, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, CURRENT_TIMESTAMP)
         ''', (
             next_id,
             email['Subject'],
-            text_body
+            text_body,
+            email['To'],
+            email['From'],
+            analysis['incident_type'],
+            analysis['severity']
         ))
         
         logger.info(f"Stored email {next_id}: {email['Subject'][:50]}...")
+        logger.info(f"Analysis: Type={analysis['incident_type']}, Severity={analysis['severity']}")
         return True
     except Exception as e:
         logger.error(f"Error storing email: {str(e)}")
@@ -756,25 +948,25 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
     }
 
 def clear_emails_table():
-    """Clear the emails table and all dependent tables"""
+    """Clear the emails table and all dependent tables - only called when user clicks 'Clear All'"""
     try:
         # Close current connection
         if 'conn' in st.session_state and st.session_state.conn is not None:
             st.session_state.conn.close()
             st.session_state.conn = None
         
-        # Delete the database file to fully clear data and reduce file size
-        if os.path.exists(DB_PATH):  # Use global DB_PATH
+        # Delete the database file to fully clear data
+        if os.path.exists(DB_PATH):
             os.remove(DB_PATH)
             logger.info(f"Deleted database file {DB_PATH}")
         
         # Reconnect and reinitialize database
-        st.session_state.conn = duckdb.connect(DB_PATH)  # Use global DB_PATH
+        st.session_state.conn = duckdb.connect(DB_PATH)
         if not init_database():
             logger.error("Failed to reinitialize database after clearing")
             return False
         
-        logger.info("Database cleared by deleting file and reinitializing")
+        logger.info("Database cleared by user request")
         return True
     except Exception as e:
         logger.error(f"Error clearing database: {str(e)}")
@@ -1126,6 +1318,93 @@ def get_db_size():
         logger.error(f"Error getting database size: {str(e)}")
         return 0
 
+# Add these functions before the UI code, in the correct order
+def reinitialize_database():
+    """Force reinitialization of the database"""
+    try:
+        # Close current connection
+        if 'conn' in st.session_state and st.session_state.conn is not None:
+            st.session_state.conn.close()
+            st.session_state.conn = None
+        
+        # Delete the database file
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+            logger.info(f"Deleted database file {DB_PATH}")
+        
+        # Reinitialize database
+        if not init_database():
+            logger.error("Failed to reinitialize database")
+            return False
+        
+        logger.info("Database reinitialized successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Error reinitializing database: {str(e)}")
+        return False
+
+def recategorize_emails():
+    """Recategorize all emails in the database"""
+    try:
+        conn = get_db_connection()
+        # Get all emails that need categorization
+        emails = conn.execute('''
+            SELECT id, email_subject, email_text_body 
+            FROM emails 
+            WHERE incident_type = 'Others' OR severity = 'Low'
+        ''').fetchall()
+        
+        if not emails:
+            logger.info("No emails need recategorization")
+            return 0, 0
+        
+        success_count = 0
+        error_count = 0
+        
+        for email_id, subject, body in emails:
+            try:
+                # Analyze the email
+                analysis = analyze_email_content(subject, body)
+                
+                # Update the database
+                conn.execute('''
+                    UPDATE emails 
+                    SET incident_type = ?, severity = ?
+                    WHERE id = ?
+                ''', (analysis['incident_type'], analysis['severity'], email_id))
+                
+                success_count += 1
+                logger.info(f"Recategorized email {email_id}: {analysis['incident_type']} - {analysis['severity']}")
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Error recategorizing email {email_id}: {str(e)}")
+        
+        return success_count, error_count
+    except Exception as e:
+        logger.error(f"Error in recategorization process: {str(e)}")
+        return 0, 0
+
+def add_reinitialize_button():
+    """Add a button to reinitialize the database"""
+    if st.button('🔄 Reinitialize Database', type='secondary'):
+        if reinitialize_database():
+            st.success('Database reinitialized successfully!')
+            st.rerun()
+        else:
+            st.error('Failed to reinitialize database. Check logs for details.')
+
+def add_recategorize_button():
+    """Add a button to recategorize emails"""
+    if st.button('🔄 Recategorize Emails', type='secondary', help='Reanalyze and recategorize all emails'):
+        with st.spinner('Recategorizing emails...'):
+            success, errors = recategorize_emails()
+            if success > 0:
+                st.success(f'✅ Recategorized {success} emails successfully!')
+            if errors > 0:
+                st.error(f'❌ Failed to recategorize {errors} emails')
+            if success == 0 and errors == 0:
+                st.info('No emails needed recategorization')
+
 # Streamlit UI
 st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
 st.title('📧 Email Analysis Dashboard')
@@ -1223,14 +1502,18 @@ with col2:
             st.warning('Please paste email JSON data to import.')
     
     # Clear Section
-    if st.button('🗑️ Clear All'):
-        if clear_emails_table():
-            st.success('✅ All emails cleared!')
-            st.rerun()
+    if st.button('🗑️ Clear All Data', type='primary', help='Warning: This will permanently delete all emails and analysis data'):
+        if st.checkbox('I understand this will permanently delete all data'):
+            if clear_emails_table():
+                st.success('✅ All data cleared successfully!')
+                st.rerun()
+            else:
+                st.error('❌ Failed to clear data')
         else:
-            st.error('❌ Failed to clear emails')
-
-  
+            st.warning('Please confirm that you understand this action cannot be undone')
+    
+    add_reinitialize_button()  # Now this will work because the function is defined above
+    
     # Show Analysis Results Button
     if st.button('📊 Show Analysis Results'):
         try:
@@ -1270,6 +1553,9 @@ with col2:
         except Exception as e:
             logger.error(f"Error displaying analysis results: {str(e)}")
             st.error("Error displaying analysis results. Please check the logs for details.")
+
+    # Add recategorize button to UI
+    add_recategorize_button()  # Add this line after other buttons
 
 # Right Column - RAG Query Interface
 with col3:
@@ -1422,9 +1708,14 @@ with status_col3:
                 SELECT 
                     e.id,
                     e.email_subject,
+                    e.email_to,
+                    e.email_from,
+                    e.incident_type,
+                    e.severity,
                     e.email_text_body,
                     e.is_analyzed,
-                    e.analyzed_at
+                    e.analyzed_at,
+                    e.created_at
                 FROM emails e
                 ORDER BY e.id DESC
             '''
@@ -1433,6 +1724,7 @@ with status_col3:
             if not emails.empty:
                 # Format the dataframe for display
                 emails['analyzed_at'] = emails['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                emails['created_at'] = emails['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
                 emails['is_analyzed'] = emails['is_analyzed'].map({True: '✅', False: '❌'})
                 emails['email_text_body'] = emails['email_text_body'].apply(
                     lambda x: x[:100] + '...' if len(str(x)) > 100 else x
@@ -1442,14 +1734,19 @@ with status_col3:
                 emails = emails.rename(columns={
                     'id': 'ID',
                     'email_subject': 'Subject',
+                    'email_to': 'To',
+                    'email_from': 'From',
+                    'incident_type': 'Incident Type',
+                    'severity': 'Severity',
                     'email_text_body': 'Body Preview',
                     'is_analyzed': 'Analyzed',
-                    'analyzed_at': 'Analyzed At'
+                    'analyzed_at': 'Analyzed At',
+                    'created_at': 'Created At'
                 })
                 
                 # Display with better formatting
                 st.dataframe(
-                    emails[['ID', 'Subject', 'Body Preview', 'Analyzed', 'Analyzed At']],
+                    emails[['ID', 'Subject', 'To', 'From', 'Incident Type', 'Severity', 'Body Preview', 'Analyzed', 'Analyzed At', 'Created At']],
                     use_container_width=True,
                     column_config={
                         "Body Preview": st.column_config.TextColumn(
@@ -1461,6 +1758,22 @@ with status_col3:
                             "Subject",
                             width="medium"
                         ),
+                        "To": st.column_config.TextColumn(
+                            "To",
+                            width="medium"
+                        ),
+                        "From": st.column_config.TextColumn(
+                            "From",
+                            width="medium"
+                        ),
+                        "Incident Type": st.column_config.TextColumn(
+                            "Incident Type",
+                            width="small"
+                        ),
+                        "Severity": st.column_config.TextColumn(
+                            "Severity",
+                            width="small"
+                        ),
                         "ID": st.column_config.NumberColumn(
                             "ID",
                             width="small"
@@ -1471,6 +1784,10 @@ with status_col3:
                         ),
                         "Analyzed At": st.column_config.TextColumn(
                             "Analyzed At",
+                            width="medium"
+                        ),
+                        "Created At": st.column_config.TextColumn(
+                            "Created At",
                             width="medium"
                         )
                     }
