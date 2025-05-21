@@ -1,3 +1,6 @@
+import os
+os.environ["STREAMLIT_WATCHER_PATCH_MODULES"] = "false"
+
 import streamlit as st
 import duckdb
 import json
@@ -18,6 +21,10 @@ import re
 from bs4 import BeautifulSoup
 import html2text
 from typing import Dict, Any
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+import numpy as np
 
 # Configure logging
 logging.basicConfig(
@@ -84,6 +91,54 @@ INCIDENT_CATEGORIES = [
 ]
 
 SEVERITY_LEVELS = ["Low", "Medium", "High"]
+
+# ChromaDB configuration
+CHROMA_PERSIST_DIR = "chroma_db"
+CHROMA_COLLECTION_NAME = "email_summaries"
+
+# Initialize ChromaDB client
+if 'chroma_client' not in st.session_state:
+    try:
+        # Create persistent client
+        st.session_state.chroma_client = chromadb.PersistentClient(
+            path=CHROMA_PERSIST_DIR,
+            settings=Settings(
+                anonymized_telemetry=False,
+                allow_reset=True
+            )
+        )
+        
+        # Use ChromaDB's default embedding function
+        embedding_function = embedding_functions.DefaultEmbeddingFunction()
+        
+        # Try to get existing collection or create new one
+        try:
+            st.session_state.email_collection = st.session_state.chroma_client.get_collection(
+                name=CHROMA_COLLECTION_NAME,
+                embedding_function=embedding_function
+            )
+            logger.info(f"Retrieved existing ChromaDB collection: {CHROMA_COLLECTION_NAME}")
+        except Exception as e:
+            logger.info(f"Creating new ChromaDB collection: {CHROMA_COLLECTION_NAME}")
+            st.session_state.email_collection = st.session_state.chroma_client.create_collection(
+                name=CHROMA_COLLECTION_NAME,
+                embedding_function=embedding_function,
+                metadata={"description": "Email summaries and analysis results"}
+            )
+        
+        logger.info("ChromaDB client and collection initialized successfully with default embedding function")
+    except Exception as e:
+        logger.error(f"Error initializing ChromaDB: {str(e)}")
+        st.error("Failed to initialize vector database. Please check the logs for details.")
+        st.stop()
+
+# Get collection from session state
+try:
+    email_collection = st.session_state.email_collection
+except Exception as e:
+    logger.error(f"Error accessing ChromaDB collection: {str(e)}")
+    st.error("Failed to access vector database. Please check the logs for details.")
+    st.stop()
 
 def get_db_connection():
     """Get or create database connection"""
@@ -375,18 +430,30 @@ def summarize_emails_bulk(batch):
         # Prepare context with all emails in the batch
         context = "Summarize these maintenance/service emails in ONE sentence each, focusing on the most critical issue or action needed:\n\n"
         for id, text_body, subject in batch:
-            context += f"Email ID {id}:\nSubject: {subject}\nBody: {text_body}\n\n"
+            # Clean and truncate text to avoid token limits
+            clean_text = text_body[:1000] if len(text_body) > 1000 else text_body
+            context += f"Email ID {id}:\nSubject: {subject}\nBody: {clean_text}\n\n"
         
         # Use large model for summarization as it's a complex task
         model_config = select_model('summarization')
         # Reduce max tokens for summary
-        model_config['max_tokens'] = min(model_config['max_tokens'], 500)
+        model_config['max_tokens'] = min(model_config['max_tokens'], 1000)  # Increased from 500
+        model_config['temperature'] = 0.3  # Lower temperature for more consistent summaries
         
         # Use DeepSeek API directly for analysis
-        logger.info("Using DeepSeek API for email summarization")
+        logger.info(f"Generating summaries for {len(batch)} emails using DeepSeek API")
         response_text = get_deepseek_response(
             messages=[
-                {"role": "system", "content": "You are an expert at summarizing maintenance and service-related emails. For each email, provide ONE concise sentence focusing on the most critical issue or action needed. Be specific but brief. Format your response with 'Email ID X:' before each summary."},
+                {"role": "system", "content": """You are an expert at summarizing maintenance and service-related emails. 
+                For each email, provide ONE concise sentence focusing on the most critical issue or action needed.
+                Guidelines:
+                1. Start each summary with 'Email ID X:'
+                2. Keep summaries to ONE sentence
+                3. Focus on the most critical issue
+                4. Include the type of issue (e.g., mechanical, electrical)
+                5. Mention severity if critical
+                6. Be specific but brief
+                7. Format: 'Email ID X: [Your one-sentence summary]'"""},
                 {"role": "user", "content": context}
             ],
             model_config=model_config
@@ -402,26 +469,28 @@ def summarize_emails_bulk(batch):
             try:
                 id_str, summary = block.split(':', 1)
                 email_id = int(id_str.strip())
-                # Ensure summary is a single sentence
-                summary = summary.strip().split('.')[0] + '.'
+                # Ensure summary is a single sentence and properly formatted
+                summary = summary.strip()
+                if not summary.endswith('.'):
+                    summary += '.'
                 summaries[email_id] = summary
-            except (ValueError, IndexError):
-                logger.warning(f"Failed to parse summary for block: {block}")
+            except (ValueError, IndexError) as e:
+                logger.warning(f"Failed to parse summary for block: {block}, Error: {str(e)}")
                 continue
         
-        # Fill in any missing summaries with truncated text
+        # Fill in any missing summaries with better fallback summaries
         for id, text_body, subject in batch:
             if id not in summaries:
                 logger.warning(f"Using fallback summary for email {id}")
-                # Create a very brief fallback summary
-                summaries[id] = f"Critical issue: {subject[:50]}..."
+                # Create a more informative fallback summary
+                summaries[id] = f"Critical issue: {subject[:100]} - Requires attention for {text_body[:100]}..."
         
         return summaries
     except Exception as e:
         logger.error(f"Error in bulk summarization: {str(e)}")
-        # Return very brief fallback summaries
+        # Return better fallback summaries
         return {
-            id: f"Critical issue: {subject[:50]}..."
+            id: f"Critical issue: {subject[:100]} - Requires attention for {text_body[:100]}..."
             for id, text_body, subject in batch
         }
 
@@ -590,7 +659,7 @@ def analyze_email_content(subject: str, body: str) -> Dict[str, Any]:
         }
 
 def store_email(email_data):
-    """Store email in database with enhanced analysis"""
+    """Store email in both DuckDB and ChromaDB with permanent embeddings"""
     try:
         email = email_data['Email']
         # Extract HTML and convert to clean text
@@ -606,7 +675,7 @@ def store_email(email_data):
         # Analyze email content using LLM
         analysis = analyze_email_content(email['Subject'], text_body)
         
-        # Store the email with all fields
+        # Store the email in DuckDB
         conn.execute('''
             INSERT INTO emails (
                 id, email_subject, email_text_body, email_to, email_from,
@@ -622,7 +691,31 @@ def store_email(email_data):
             analysis['severity']
         ))
         
-        logger.info(f"Stored email {next_id}: {email['Subject'][:50]}...")
+        # Generate summary for the email
+        summary = summarize_emails_bulk([(next_id, text_body, email['Subject'])])[next_id]
+        
+        # Store in ChromaDB permanently
+        try:
+            current_time = datetime.now()
+            email_collection.add(
+                documents=[summary],
+                metadatas=[{
+                    'email_id': next_id,
+                    'subject': email['Subject'],
+                    'incident_type': analysis['incident_type'],
+                    'severity': analysis['severity'],
+                    'created_at': current_time.isoformat(),
+                    'created_at_timestamp': int(current_time.timestamp()),
+                    'is_analyzed': False
+                }],
+                ids=[str(next_id)]
+            )
+            logger.info(f"Stored email {next_id} in ChromaDB with embedding")
+        except Exception as e:
+            logger.error(f"Error storing in ChromaDB: {str(e)}")
+            # Continue even if ChromaDB storage fails - we still have the email in DuckDB
+        
+        logger.info(f"Stored email {next_id} in DuckDB")
         logger.info(f"Analysis: Type={analysis['incident_type']}, Severity={analysis['severity']}")
         return True
     except Exception as e:
@@ -947,177 +1040,233 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
         'analysis_stats': analysis_stats
     }
 
-def clear_emails_table():
-    """Clear the emails table and all dependent tables - only called when user clicks 'Clear All'"""
-    try:
-        # Close current connection
-        if 'conn' in st.session_state and st.session_state.conn is not None:
-            st.session_state.conn.close()
-            st.session_state.conn = None
-        
-        # Delete the database file to fully clear data
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-            logger.info(f"Deleted database file {DB_PATH}")
-        
-        # Reconnect and reinitialize database
-        st.session_state.conn = duckdb.connect(DB_PATH)
-        if not init_database():
-            logger.error("Failed to reinitialize database after clearing")
-            return False
-        
-        logger.info("Database cleared by user request")
-        return True
-    except Exception as e:
-        logger.error(f"Error clearing database: {str(e)}")
-        return False
-
-def get_total_analyzed_emails():
-    """Get the total number of analyzed emails"""
-    try:
-        conn = get_db_connection()
-        result = conn.execute("""
-            SELECT COUNT(*) 
-            FROM emails 
-            WHERE is_analyzed = TRUE
-        """).fetchone()[0]
-        return result
-    except Exception as e:
-        logger.error(f"Error getting total analyzed emails: {str(e)}")
-        return 0
-
-def determine_relevant_categories(query_text):
-    """Determine which analysis categories are relevant to the user's query"""
-    query_lower = query_text.lower()
-    
-    # Define category keywords
-    category_keywords = {
-        'procedural_deviations': [
-            'procedure', 'process', 'protocol', 'deviation', 'mistake', 'error',
-            'procedure', 'step', 'method', 'approach', 'guideline', 'standard',
-            'violation', 'breach', 'non-compliance', 'procedure', 'process'
-        ],
-        'recurrence_indicators': [
-            'recur', 'repeat', 'pattern', 'frequency', 'often', 'repeatedly',
-            'recurring', 'consistent', 'regular', 'cycle', 'trend', 'pattern',
-            'frequent', 'repetitive', 'recurring', 'repeated'
-        ],
-        'systemic_trends': [
-            'system', 'trend', 'overall', 'general', 'broad', 'widespread',
-            'systemic', 'across', 'throughout', 'common', 'universal', 'global',
-            'trend', 'pattern', 'theme', 'systemic'
-        ]
-    }
-    
-    # Count keyword matches for each category
-    category_scores = {
-        'procedural_deviations': sum(1 for word in category_keywords['procedural_deviations'] if word in query_lower),
-        'recurrence_indicators': sum(1 for word in category_keywords['recurrence_indicators'] if word in query_lower),
-        'systemic_trends': sum(1 for word in category_keywords['systemic_trends'] if word in query_lower)
-    }
-    
-    # If no specific category is detected, return all categories
-    if sum(category_scores.values()) == 0:
-        return ['procedural_deviations', 'recurrence_indicators', 'systemic_trends']
-    
-    # Return categories that have at least one keyword match
-    return [category for category, score in category_scores.items() if score > 0]
-
 def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_quality=0.5):
-    """Get context from analyzed emails for RAG using their analysis summaries"""
+    """Get context from analyzed emails using permanent vector embeddings"""
     try:
-        # Get database connection
-        conn = get_db_connection()
-        
-        # Log the incoming parameters
-        logger.info(f"Getting email context - Query: '{query_text}', Limit: {limit}, Days back: {days_back}")
-        
         # Calculate date threshold
         date_threshold = datetime.now() - timedelta(days=days_back)
+        # Convert to timestamp for ChromaDB comparison
+        date_threshold_timestamp = int(date_threshold.timestamp())
+        logger.info(f"Retrieving context with parameters: limit={limit}, days_back={days_back}, date_threshold={date_threshold.isoformat()}")
         
-        # Determine which categories are relevant to the query
-        relevant_categories = determine_relevant_categories(query_text) if query_text else [
-            'procedural_deviations', 'recurrence_indicators', 'systemic_trends'
-        ]
-        
-        # Build dynamic SELECT clause based on relevant categories
-        select_clause = ', '.join([
-            f"COALESCE({category}, '') as {category}"
-            for category in relevant_categories
-        ])
-        
-        # Get analyzed emails with their analysis results within date range
-        query = f'''
-            WITH ranked_emails AS (
-                SELECT 
-                    ar.email_id,
-                    ar.analysis_date,
-                    {select_clause},
-                    -- Calculate analysis quality based on content length and category coverage
-                    (
-                        LENGTH(COALESCE(procedural_deviations, '')) +
-                        LENGTH(COALESCE(recurrence_indicators, '')) +
-                        LENGTH(COALESCE(systemic_trends, ''))
-                    ) / 3.0 as analysis_quality
-                FROM analysis_results_new ar
-                WHERE ar.analysis_date >= ?
-                ORDER BY ar.analysis_date DESC
-            )
-            SELECT * FROM ranked_emails
-            WHERE analysis_quality >= ?
-            LIMIT ?
-        '''
-        results = conn.execute(query, [date_threshold, min_analysis_quality, MAX_EMAILS_PER_CONTEXT]).fetchall()
-        
-        if not results:
-            return f"No analyzed emails found in the last {days_back} days with sufficient analysis quality.", 0
-        
-        # Get email subjects in a separate query
-        email_ids = [r[0] for r in results]
-        subjects = {id: subject for id, subject in conn.execute(
-            'SELECT id, email_subject FROM emails WHERE id IN ({})'.format(
-                ','.join('?' * len(email_ids))
-            ), email_ids).fetchall()}
-        
-        # Process results with increased context size
-        total_chars = 0
-        used_emails = set()
-        context_parts = []
-        
-        for email_id, analysis_date, *analysis_values in results:
-            if email_id in used_emails or total_chars >= MAX_CONTEXT_SIZE:
-                break
+        if query_text:
+            try:
+                logger.info(f"Processing query: '{query_text}'")
+                # Get recent emails first for fallback
+                conn = get_db_connection()
+                recent_emails = conn.execute('''
+                    SELECT id, email_subject, email_text_body, incident_type, severity
+                    FROM emails 
+                    WHERE created_at >= ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                ''', (date_threshold.isoformat(), limit * 2)).fetchall()
                 
-            subject = subjects.get(email_id, "Subject not found")
-            analysis_summary = []
+                if not recent_emails:
+                    logger.warning(f"No emails found in the last {days_back} days")
+                    return f"No emails found in the last {days_back} days.", 0
+                
+                logger.info(f"Found {len(recent_emails)} recent emails for potential fallback")
+                
+                # Query ChromaDB directly for similar summaries
+                logger.info("Querying ChromaDB for similar summaries...")
+                results = email_collection.query(
+                    query_texts=[query_text],
+                    n_results=limit * 2,  # Get more results than needed for filtering
+                    where={"created_at_timestamp": {"$gte": date_threshold_timestamp}},
+                    include=["documents", "metadatas", "distances"]
+                )
+                
+                # Log ChromaDB query results
+                if results['documents'] and results['documents'][0]:
+                    logger.info(f"ChromaDB returned {len(results['documents'][0])} results")
+                    for i, (doc, metadata, distance) in enumerate(zip(results['documents'][0], results['metadatas'][0], results['distances'][0])):
+                        logger.info(f"Result {i+1}:")
+                        logger.info(f"  Email ID: {metadata['email_id']}")
+                        logger.info(f"  Subject: {metadata['subject']}")
+                        logger.info(f"  Incident Type: {metadata['incident_type']}")
+                        logger.info(f"  Severity: {metadata['severity']}")
+                        logger.info(f"  Similarity Score: {1 - distance:.2f}")
+                        logger.info(f"  Summary: {doc[:200]}...")
+                else:
+                    logger.warning("No results from vector search, falling back to text search")
+                    return get_fallback_context(recent_emails, query_text, limit, days_back)
+                
+                # Get full email details from DuckDB
+                email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+                logger.info(f"Retrieving full details for {len(email_ids)} emails from DuckDB")
+                
+                # Get full email details
+                emails = conn.execute('''
+                    SELECT id, email_subject, email_text_body, incident_type, severity
+                    FROM emails 
+                    WHERE id IN ({})
+                '''.format(','.join('?' * len(email_ids))), email_ids).fetchall()
+                
+                logger.info(f"Retrieved {len(emails)} full email details from DuckDB")
+                
+                # Build context from results
+                context_parts = []
+                total_chars = 0
+                used_emails = set()
+                
+                for doc, metadata, distance in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
+                    email_id = int(metadata['email_id'])
+                    if email_id in used_emails or total_chars >= MAX_CONTEXT_SIZE:
+                        continue
+                    
+                    # Find matching email details
+                    email_detail = next((e for e in emails if e[0] == email_id), None)
+                    if email_detail:
+                        id, subject, body, inc_type, sev = email_detail
+                        email_content = f"""Email {id} (Similarity: {1 - distance:.2f}):
+{doc}
+Body Preview: {body[:200]}..."""
+                        
+                        email_size = len(email_content)
+                        if total_chars + email_size <= MAX_CONTEXT_SIZE:
+                            used_emails.add(email_id)
+                            context_parts.append(email_content)
+                            total_chars += email_size
+                            logger.info(f"Added email {id} to context (size: {email_size} chars, total: {total_chars} chars)")
+                
+                # Build final context
+                context = f"Similar email summaries (showing {len(used_emails)} emails, {total_chars} chars)\n"
+                context += f"Query: {query_text}\n"
+                context += f"Analysis period: Last {days_back} days\n"
+                context += "\n".join(context_parts)
+                
+                logger.info(f"Final context built with {len(used_emails)} emails, {total_chars} total characters")
+                return context, len(used_emails)
+                
+            except Exception as e:
+                logger.error(f"Error in vector search: {str(e)}")
+                logger.info("Falling back to text search due to vector search error")
+                # Fallback to simple text search if vector search fails
+                return get_fallback_context(recent_emails, query_text, limit, days_back)
             
-            for category, value in zip(relevant_categories, analysis_values):
-                if value:
-                    display_name = ' '.join(word.capitalize() for word in category.split('_'))
-                    analysis_summary.append(f"{display_name}: {value}")
+        else:
+            # If no query text, get recent emails directly from DuckDB
+            logger.info("No query text provided, retrieving recent emails")
+            conn = get_db_connection()
+            emails = conn.execute('''
+                SELECT id, email_subject, email_text_body, incident_type, severity
+                FROM emails 
+                WHERE created_at >= ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            ''', (date_threshold.isoformat(), limit)).fetchall()
             
-            if analysis_summary:
-                email_content = f"Email {email_id} (Analyzed: {analysis_date}):\nSubject: {subject}\nAnalysis: {' | '.join(analysis_summary)}"
+            if not emails:
+                logger.warning(f"No emails found in the last {days_back} days")
+                return f"No emails found in the last {days_back} days.", 0
+            
+            logger.info(f"Retrieved {len(emails)} recent emails from DuckDB")
+            
+            # Get summaries from ChromaDB for these emails
+            try:
+                logger.info("Retrieving summaries from ChromaDB")
+                summaries = email_collection.get(
+                    ids=[str(id) for id, _, _, _, _ in emails],
+                    include=["documents", "metadatas"]
+                )
+                summary_map = {int(metadata['email_id']): doc 
+                             for doc, metadata in zip(summaries['documents'], summaries['metadatas'])}
+                logger.info(f"Retrieved {len(summary_map)} summaries from ChromaDB")
+            except Exception as e:
+                logger.error(f"Error getting summaries from ChromaDB: {str(e)}")
+                summary_map = {}
+            
+            # Generate context with summaries
+            context_parts = []
+            total_chars = 0
+            
+            for id, subject, body, inc_type, sev in emails:
+                if total_chars >= MAX_CONTEXT_SIZE:
+                    break
+                
+                # Use stored summary if available, otherwise generate new one
+                summary = summary_map.get(id)
+                if not summary:
+                    logger.info(f"Generating new summary for email {id}")
+                    summary = summarize_emails_bulk([(id, body, subject)])[id]
+                else:
+                    logger.info(f"Using stored summary for email {id}")
+                
+                email_content = f"""Email {id}:
+Subject: {subject}
+Incident Type: {inc_type}
+Severity: {sev}
+Summary: {summary}
+Body Preview: {body[:200]}..."""
+                
                 email_size = len(email_content)
-                
                 if total_chars + email_size <= MAX_CONTEXT_SIZE:
-                    used_emails.add(email_id)
                     context_parts.append(email_content)
                     total_chars += email_size
-        
-        # Build final context
-        categories_str = ', '.join(category.replace('_', ' ').title() for category in relevant_categories)
-        context = f"Analyzed email summaries (showing {len(used_emails)} emails, {total_chars} chars)\n"
-        context += f"Categories included: {categories_str}\n"
-        context += f"Analysis period: Last {days_back} days\n"
-        context += "\n".join(context_parts)
-        
-        logger.info(f"Context summary: {len(used_emails)} emails, {total_chars} chars")
-        return context, len(used_emails)
-        
+                    logger.info(f"Added email {id} to context (size: {email_size} chars, total: {total_chars} chars)")
+            
+            # Build final context
+            context = f"Recent email summaries (showing {len(context_parts)} emails, {total_chars} chars)\n"
+            context += f"Analysis period: Last {days_back} days\n"
+            context += "\n".join(context_parts)
+            
+            logger.info(f"Final context built with {len(context_parts)} emails, {total_chars} total characters")
+            return context, len(context_parts)
+            
     except Exception as e:
         logger.error(f"Error getting email context: {str(e)}")
         return "Error retrieving email context. Please check the logs for details.", 0
+
+def get_fallback_context(emails, query_text, limit, days_back):
+    """Fallback method using simple text similarity when vector search fails"""
+    try:
+        # Use TF-IDF for simple text similarity
+        vectorizer = TfidfVectorizer(stop_words='english')
+        texts = [f"{subject} {body[:500]}" for _, subject, body, _, _ in emails]
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        query_vector = vectorizer.transform([query_text])
+        
+        # Calculate similarities
+        similarities = cosine_similarity(query_vector, tfidf_matrix)[0]
+        
+        # Get top similar emails
+        top_indices = similarities.argsort()[-limit:][::-1]
+        
+        context_parts = []
+        total_chars = 0
+        
+        for idx in top_indices:
+            if total_chars >= MAX_CONTEXT_SIZE:
+                break
+                
+            id, subject, body, inc_type, sev = emails[idx]
+            similarity = similarities[idx]
+            
+            # Generate summary for this email
+            summary = summarize_emails_bulk([(id, body, subject)])[id]
+            email_content = f"""Email {id} (Similarity: {similarity:.2f}):
+Subject: {subject}
+Incident Type: {inc_type}
+Severity: {sev}
+Summary: {summary}
+Body Preview: {body[:200]}..."""
+            
+            email_size = len(email_content)
+            if total_chars + email_size <= MAX_CONTEXT_SIZE:
+                context_parts.append(email_content)
+                total_chars += email_size
+        
+        context = f"Similar email summaries (showing {len(context_parts)} emails, {total_chars} chars)\n"
+        context += f"Query: {query_text}\n"
+        context += f"Analysis period: Last {days_back} days\n"
+        context += "\n".join(context_parts)
+        
+        return context, len(context_parts)
+        
+    except Exception as e:
+        logger.error(f"Error in fallback context generation: {str(e)}")
+        return "Error generating context. Please try a different query.", 0
 
 def get_cached_query(query_text, context_size, model_name):
     """Get cached query result if available and not expired"""
@@ -1190,38 +1339,40 @@ def store_analysis_results(email_id, procedural_deviations, recurrence_indicator
         return False
 
 def get_similar_emails(query_text, limit=5):
-    """Get similar emails using TF-IDF and cosine similarity"""
+    """Get similar emails using ChromaDB vector similarity search"""
     try:
-        conn = get_db_connection()
-        # Get all emails
-        emails = conn.execute('''
-            SELECT id, email_subject, email_text_body
-            FROM emails
-        ''').fetchall()
+        # Query ChromaDB for similar documents
+        results = email_collection.query(
+            query_texts=[query_text],
+            n_results=limit,
+            include=["documents", "metadatas", "distances"]
+        )
         
-        if not emails:
+        if not results['documents'] or not results['documents'][0]:
             return []
         
-        # Prepare texts for TF-IDF
-        texts = [f"Subject: {subject}\nBody: {body}" for _, subject, body in emails]
-        texts.insert(0, query_text)  # Add query text at the beginning
+        # Get additional details from DuckDB
+        conn = get_db_connection()
+        email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
         
-        # Create TF-IDF vectors
-        vectorizer = TfidfVectorizer(stop_words='english')
-        tfidf_matrix = vectorizer.fit_transform(texts)
+        # Get full email details
+        email_details = conn.execute('''
+            SELECT id, email_subject, email_text_body
+            FROM emails 
+            WHERE id IN ({})
+        '''.format(','.join('?' * len(email_ids))), email_ids).fetchall()
         
-        # Calculate similarities with query
-        similarities = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:])
+        # Create results list with similarity scores
+        results_list = []
+        for doc, metadata, distance in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
+            email_id = int(metadata['email_id'])
+            # Find matching email details
+            email_detail = next((e for e in email_details if e[0] == email_id), None)
+            if email_detail:
+                _, subject, text = email_detail
+                results_list.append((email_id, subject, text, 1 - distance))  # Convert distance to similarity
         
-        # Create results list
-        results = []
-        for i, (id, subject, text) in enumerate(emails):
-            similarity = similarities[0][i]
-            results.append((id, subject, text, similarity))
-        
-        # Sort by similarity and return top results
-        results.sort(key=lambda x: x[3], reverse=True)
-        return results[:limit]
+        return results_list
     except Exception as e:
         logger.error(f"Error finding similar emails: {str(e)}")
         return []
@@ -1405,6 +1556,270 @@ def add_recategorize_button():
             if success == 0 and errors == 0:
                 st.info('No emails needed recategorization')
 
+def get_total_analyzed_emails():
+    """Get the total number of analyzed emails from ChromaDB"""
+    try:
+        results = email_collection.get(
+            where={"analyzed": True}
+        )
+        return len(results['ids'])
+    except Exception as e:
+        logger.error(f"Error getting total analyzed emails: {str(e)}")
+        return 0
+
+def determine_relevant_categories(query_text):
+    """Determine which analysis categories are relevant to the user's query"""
+    query_lower = query_text.lower()
+    
+    # Define category keywords
+    category_keywords = {
+        'procedural_deviations': [
+            'procedure', 'process', 'protocol', 'deviation', 'mistake', 'error',
+            'procedure', 'step', 'method', 'approach', 'guideline', 'standard',
+            'violation', 'breach', 'non-compliance', 'procedure', 'process'
+        ],
+        'recurrence_indicators': [
+            'recur', 'repeat', 'pattern', 'frequency', 'often', 'repeatedly',
+            'recurring', 'consistent', 'regular', 'cycle', 'trend', 'pattern',
+            'frequent', 'repetitive', 'recurring', 'repeated'
+        ],
+        'systemic_trends': [
+            'system', 'trend', 'overall', 'general', 'broad', 'widespread',
+            'systemic', 'across', 'throughout', 'common', 'universal', 'global',
+            'trend', 'pattern', 'theme', 'systemic'
+        ]
+    }
+    
+    # Count keyword matches for each category
+    category_scores = {
+        'procedural_deviations': sum(1 for word in category_keywords['procedural_deviations'] if word in query_lower),
+        'recurrence_indicators': sum(1 for word in category_keywords['recurrence_indicators'] if word in query_lower),
+        'systemic_trends': sum(1 for word in category_keywords['systemic_trends'] if word in query_lower)
+    }
+    
+    # If no specific category is detected, return all categories
+    if sum(category_scores.values()) == 0:
+        return ['procedural_deviations', 'recurrence_indicators', 'systemic_trends']
+    
+    # Return categories that have at least one keyword match
+    return [category for category, score in category_scores.items() if score > 0]
+
+def clear_emails_table():
+    """Clear both DuckDB and ChromaDB databases"""
+    try:
+        # Clear DuckDB
+        if 'conn' in st.session_state and st.session_state.conn is not None:
+            st.session_state.conn.close()
+            st.session_state.conn = None
+        
+        if os.path.exists(DB_PATH):
+            os.remove(DB_PATH)
+            logger.info(f"Deleted database file {DB_PATH}")
+        
+        # Clear ChromaDB
+        if not clear_vector_store():
+            logger.error("Failed to clear vector store")
+            return False
+        
+        # Reinitialize database
+        st.session_state.conn = duckdb.connect(DB_PATH)
+        if not init_database():
+            logger.error("Failed to reinitialize database after clearing")
+            return False
+        
+        logger.info("Database and vector store cleared by user request")
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing databases: {str(e)}")
+        return False
+
+def update_email_embeddings(email_ids=None):
+    """Update embeddings for specified emails or all emails if no IDs provided"""
+    try:
+        conn = get_db_connection()
+        
+        # Get emails to update
+        if email_ids:
+            query = '''
+                SELECT id, email_subject, email_text_body, incident_type, severity
+                FROM emails 
+                WHERE id IN ({})
+            '''.format(','.join('?' * len(email_ids)))
+            emails = conn.execute(query, email_ids).fetchall()
+        else:
+            emails = conn.execute('''
+                SELECT id, email_subject, email_text_body, incident_type, severity
+                FROM emails 
+                ORDER BY id DESC
+            ''').fetchall()
+        
+        if not emails:
+            logger.info("No emails to update")
+            return 0, 0
+        
+        success_count = 0
+        error_count = 0
+        
+        # Process in smaller batches to avoid overwhelming the LLM
+        batch_size = 5  # Reduced batch size for better reliability
+        for i in range(0, len(emails), batch_size):
+            batch = emails[i:i + batch_size]
+            try:
+                # Prepare batch for summarization
+                batch_data = [(id, body, subject) for id, subject, body, _, _ in batch]
+                
+                # Generate summaries with retry logic
+                max_retries = 3
+                summaries = None
+                for attempt in range(max_retries):
+                    try:
+                        summaries = summarize_emails_bulk(batch_data)
+                        # Verify summaries were generated properly
+                        if all(summaries.get(id) and len(summaries[id].strip()) > 0 for id, _, _ in batch_data):
+                            break
+                        logger.warning(f"Attempt {attempt + 1}: Some summaries were empty, retrying...")
+                    except Exception as e:
+                        logger.error(f"Attempt {attempt + 1} failed: {str(e)}")
+                        if attempt == max_retries - 1:
+                            raise
+                        time.sleep(1)  # Wait before retry
+                
+                if not summaries:
+                    raise Exception("Failed to generate summaries after all retries")
+                
+                # Prepare metadata for ChromaDB
+                metadatas = []
+                documents = []
+                ids = []
+                
+                for id, subject, body, inc_type, sev in batch:
+                    summary = summaries.get(id)
+                    if not summary or not summary.strip():
+                        # Generate a basic summary if LLM summary failed
+                        summary = f"Subject: {subject}\nIncident Type: {inc_type}\nSeverity: {sev}\nSummary: Critical issue related to {inc_type.lower()} with {sev.lower()} severity."
+                        logger.warning(f"Using basic summary for email {id}")
+                    
+                    current_time = datetime.now()
+                    metadatas.append({
+                        'email_id': id,
+                        'subject': subject,
+                        'incident_type': inc_type,
+                        'severity': sev,
+                        'created_at': current_time.isoformat(),
+                        'created_at_timestamp': int(current_time.timestamp()),
+                        'is_analyzed': True,
+                        'summary_type': 'llm' if summaries.get(id) else 'basic'
+                    })
+                    documents.append(summary)
+                    ids.append(str(id))
+                
+                # Update ChromaDB
+                try:
+                    # Delete existing entries
+                    email_collection.delete(
+                        ids=ids
+                    )
+                    
+                    # Add updated entries
+                    email_collection.add(
+                        documents=documents,
+                        metadatas=metadatas,
+                        ids=ids
+                    )
+                    success_count += len(batch)
+                    logger.info(f"Updated embeddings for batch of {len(batch)} emails")
+                except Exception as e:
+                    error_count += len(batch)
+                    logger.error(f"Error updating ChromaDB for batch: {str(e)}")
+                
+                # Small delay between batches to avoid rate limits
+                time.sleep(0.5)
+                
+            except Exception as e:
+                error_count += len(batch)
+                logger.error(f"Error processing batch: {str(e)}")
+                continue
+        
+        # Log final results
+        if success_count > 0:
+            logger.info(f"Successfully updated {success_count} email embeddings")
+        if error_count > 0:
+            logger.warning(f"Failed to update {error_count} email embeddings")
+        
+        return success_count, error_count
+    except Exception as e:
+        logger.error(f"Error in update_email_embeddings: {str(e)}")
+        return 0, 0
+
+def clear_vector_store():
+    """Clear the ChromaDB collection"""
+    try:
+        # Delete the collection
+        st.session_state.chroma_client.delete_collection(CHROMA_COLLECTION_NAME)
+        
+        # Recreate the collection
+        st.session_state.email_collection = st.session_state.chroma_client.create_collection(
+            name=CHROMA_COLLECTION_NAME,
+            embedding_function=embedding_functions.DefaultEmbeddingFunction(),
+            metadata={"description": "Email summaries and analysis results"}
+        )
+        
+        logger.info("ChromaDB collection cleared and recreated")
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing vector store: {str(e)}")
+        return False
+
+def get_vector_store_stats():
+    """Get statistics about the ChromaDB collection"""
+    try:
+        count = email_collection.count()
+        return {
+            'total_documents': count,
+            'collection_name': CHROMA_COLLECTION_NAME,
+            'embedding_function': 'DefaultEmbeddingFunction'
+        }
+    except Exception as e:
+        logger.error(f"Error getting vector store stats: {str(e)}")
+        return None
+
+# Add these functions to the UI section
+def add_vector_store_management():
+    """Add vector store management controls to the UI"""
+    st.markdown("### Vector Store Management")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        if st.button('🔄 Update All Embeddings', type='secondary'):
+            with st.spinner('Updating embeddings...'):
+                success, errors = update_email_embeddings()
+                if success > 0:
+                    st.success(f'✅ Updated {success} embeddings successfully!')
+                if errors > 0:
+                    st.error(f'❌ Failed to update {errors} embeddings')
+    
+    with col2:
+        if st.button('🗑️ Clear Vector Store', type='secondary'):
+            if st.checkbox('I understand this will delete all vector embeddings'):
+                if clear_vector_store():
+                    st.success('✅ Vector store cleared successfully!')
+                    st.rerun()
+                else:
+                    st.error('❌ Failed to clear vector store')
+            else:
+                st.warning('Please confirm that you understand this action cannot be undone')
+    
+    # Show vector store statistics
+    stats = get_vector_store_stats()
+    if stats:
+        st.markdown("#### Vector Store Statistics")
+        st.markdown(f"""
+        - Total Documents: {stats['total_documents']}
+        - Collection Name: {stats['collection_name']}
+        - Embedding Function: {stats['embedding_function']}
+        """)
+
 # Streamlit UI
 st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
 st.title('📧 Email Analysis Dashboard')
@@ -1556,6 +1971,7 @@ with col2:
 
     # Add recategorize button to UI
     add_recategorize_button()  # Add this line after other buttons
+    add_vector_store_management()  # Add this line
 
 # Right Column - RAG Query Interface
 with col3:

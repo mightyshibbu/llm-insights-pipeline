@@ -1,13 +1,11 @@
-streamlit
-duckdb
-polars
-python-dateutil
-openai
-python-dotenv
-numpy
-sentence-transformers
-httpx
-beautifulsoup4 
-lxml 
-html2text
-groq
+streamlit>=1.24.0
+duckdb>=0.8.1
+python-dotenv>=1.0.0
+groq>=0.4.0
+requests>=2.31.0
+scikit-learn>=1.3.0
+beautifulsoup4>=4.12.2
+html2text>=2020.1.16
+chromadb>=0.4.18
+numpy>=1.24.0
+openai>=1.0.0  # For OpenAI embeddings (optional)
