@@ -8,4 +8,5 @@ beautifulsoup4>=4.12.2
 html2text>=2020.1.16
 chromadb>=0.4.18
 numpy>=1.24.0
-openai>=1.0.0  # For OpenAI embeddings (optional)
+openai>=1.0.0  
+protobuf>=3.20.0,<4.0.0
