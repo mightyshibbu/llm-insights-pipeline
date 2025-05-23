@@ -2,6 +2,9 @@ import os
 os.environ["STREAMLIT_WATCHER_PATCH_MODULES"] = "false"
 
 import streamlit as st
+# Set page config must be the first Streamlit command
+st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
+
 import duckdb
 import json
 from datetime import datetime, timedelta
@@ -43,6 +46,8 @@ if 'env_loaded' not in st.session_state:
     st.session_state.env_loaded = True
     logger.info("Environment variables loaded")
 
+import sqlite3
+st.write("SQLite version:", sqlite3.sqlite_version)
 # Model configurations
 DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
@@ -1821,7 +1826,6 @@ def add_vector_store_management():
         """)
 
 # Streamlit UI
-st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
 st.title('📧 Email Analysis Dashboard')
 
 # Create three main columns
