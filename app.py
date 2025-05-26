@@ -28,6 +28,8 @@ import chromadb
 from chromadb.config import Settings
 from chromadb.utils import embedding_functions
 import numpy as np
+import plotly.express as px
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -46,8 +48,6 @@ if 'env_loaded' not in st.session_state:
     st.session_state.env_loaded = True
     logger.info("Environment variables loaded")
 
-import sqlite3
-st.write("SQLite version:", sqlite3.sqlite_version)
 # Model configurations
 DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
@@ -1828,97 +1828,179 @@ def add_vector_store_management():
 # Streamlit UI
 st.title('📧 Email Analysis Dashboard')
 
-# Create three main columns
-col1, col2, col3 = st.columns([1, 1, 1])
+# Create tabs for different sections
+tab1, tab2 = st.tabs(["📨 Email Analysis", "📊 Analytics"])
 
-# Left Column - Insights
-with col1:
-    st.subheader('🔍 Process Analysis')
-    
-    # Add options for analysis
-    col1_1, col1_2 = st.columns(2)
-    with col1_1:
-        include_analyzed = st.checkbox('Include previously analyzed emails', value=False)
-    with col1_2:
-        batch_size = st.number_input('Batch Size', min_value=5, max_value=20, value=10, step=5)
-    
-    # Add similarity batching options
-    col1_3, col1_4 = st.columns(2)
-    with col1_3:
-        use_similarity = st.checkbox('Use Similarity Batching', value=False)
-    with col1_4:
-        similarity_threshold = st.slider(
-            'Similarity Threshold',
-            min_value=0.5,
-            max_value=0.9,
-            value=0.7,
-            step=0.1,
-            help='Higher values mean emails need to be more similar to be grouped together'
-        )
-    
-    if st.button('Update Insights'):
-        with st.spinner('Analyzing...'):
-            insights = get_insights(
-                include_analyzed=include_analyzed,
-                batch_size=batch_size,
-                use_similarity_batching=use_similarity,
-                similarity_threshold=similarity_threshold
-            )
-            st.session_state['insights'] = insights
-            logger.info("Insights updated in session state")
+with tab1:
+    # Original content will go here
+    pass
 
-    if 'insights' in st.session_state:
-        st.markdown(f"**Last Updated:** {st.session_state['insights']['last_updated']}")
-        
-        # Display analysis statistics
-        stats = st.session_state['insights']['analysis_stats']
-        st.markdown("### 📊 Analysis Statistics")
-        st.markdown(f"""
-        - Total Emails: {stats.get('total_emails', 0)}
-        - Emails Analyzed: {stats.get('analyzed_emails', 0)}
-        - Emails Referenced: {stats.get('referenced_emails', 0)}
-        - Batches Processed: {stats.get('batches_processed', 0)}
-        - Batching Method: {stats.get('batching_method', 'N/A')}
-        """)
-        
-        with st.expander("Procedural Deviations", expanded=True):
-            st.write(st.session_state['insights']['procedural_deviations'])
-        
-        with st.expander("Recurrence Indicators", expanded=True):
-            st.write(st.session_state['insights']['recurrence_indicators'])
-        
-        with st.expander("Systemic Trends", expanded=True):
-            st.write(st.session_state['insights']['systemic_trends'])
-
-# Middle Column - Data Management
-with col2:
-    st.subheader('📥 Data Management')
+with tab2:
+    st.header("📈 Email Analytics")
     
-    # Import Section
-    bulk_email_json = st.text_area(
-        label="Paste email JSON",
-        height=100,
-        key="bulk_email_json"
-    )
-    
-    if st.button('Import Emails'):
-        if bulk_email_json:
-            try:
-                emails_data = json.loads(bulk_email_json)
-                if not isinstance(emails_data, list):
-                    emails_data = [emails_data]
-                
-                with st.spinner('Importing emails...'):
-                    success_count, error_count, error_messages = store_multiple_emails(emails_data)
-                    st.success(f'✅ Imported {success_count} emails!')
-                    if error_count > 0:
-                        st.error(f'❌ Failed to import {error_count} emails')
-                        for error in error_messages:
-                            st.error(error)
-            except Exception as e:
-                st.error(f'Error processing import: {str(e)}')
+    # Load email data from ChromaDB
+    try:
+        collection = st.session_state.chroma_client.get_collection("email_summaries")
+        results = collection.get(include=["metadatas", "documents"])
+        
+        if results['ids']:
+            # Convert to DataFrame
+            df = pd.DataFrame({
+                'id': results['ids'],
+                **{f'metadata_{k}': [d.get(k) for d in results['metadatas']] 
+                   for k in results['metadatas'][0].keys()},
+                'content': results['documents']
+            })
+            
+            # Convert timestamp if exists
+            if 'metadata_timestamp' in df.columns:
+                df['timestamp'] = pd.to_datetime(df['metadata_timestamp'], unit='s')
+            
+            # Display metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Emails", len(df))
+            with col2:
+                if 'metadata_sender' in df.columns:
+                    st.metric("Unique Senders", df['metadata_sender'].nunique())
+            with col3:
+                if 'metadata_incident_type' in df.columns:
+                    st.metric("Incident Types", df['metadata_incident_type'].nunique())
+            with col4:
+                if 'metadata_severity' in df.columns:
+                    st.metric("High Severity", df[df['metadata_severity'] == 'High'].shape[0])
+            
+            # Create two columns for charts
+            col1, col2 = st.columns(2)
+            
+            # Incident Type Distribution
+            with col1:
+                if 'metadata_incident_type' in df.columns:
+                    st.subheader("Incident Types")
+                    fig = px.pie(
+                        df['metadata_incident_type'].value_counts(),
+                        names=df['metadata_incident_type'].value_counts().index,
+                        values=df['metadata_incident_type'].value_counts().values
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            # Severity Distribution
+            with col2:
+                if 'metadata_severity' in df.columns:
+                    st.subheader("Severity Levels")
+                    fig = px.bar(
+                        df['metadata_severity'].value_counts(),
+                        x=df['metadata_severity'].value_counts().index,
+                        y=df['metadata_severity'].value_counts().values,
+                        labels={'x': 'Severity', 'y': 'Count'}
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            # Timeline of Emails
+            if 'timestamp' in df.columns:
+                st.subheader("Emails Over Time")
+                timeline = df.set_index('timestamp').resample('D').size()
+                fig = px.line(timeline, labels={'value': 'Number of Emails', 'timestamp': 'Date'})
+                st.plotly_chart(fig, use_container_width=True)
+            
         else:
-            st.warning('Please paste email JSON data to import.')
+            st.warning("No email data found in the database.")
+            
+    except Exception as e:
+        st.error(f"Error loading analytics: {str(e)}")
+
+# Create three main columns for the original content
+with tab1:
+    col1, col2, col3 = st.columns([1, 1, 1])
+
+    # Left Column - Insights
+    with col1:
+        st.subheader('🔍 Process Analysis')
+        
+        # Add options for analysis
+        col1_1, col1_2 = st.columns(2)
+        with col1_1:
+            include_analyzed = st.checkbox('Include previously analyzed emails', value=False)
+        with col1_2:
+            batch_size = st.number_input('Batch Size', min_value=5, max_value=20, value=10, step=5)
+        
+        # Add similarity batching options
+        col1_3, col1_4 = st.columns(2)
+        with col1_3:
+            use_similarity = st.checkbox('Use Similarity Batching', value=False)
+        with col1_4:
+            similarity_threshold = st.slider(
+                'Similarity Threshold',
+                min_value=0.5,
+                max_value=0.9,
+                value=0.7,
+                step=0.1,
+                help='Higher values mean emails need to be more similar to be grouped together'
+            )
+        
+        if st.button('Update Insights'):
+            with st.spinner('Analyzing...'):
+                insights = get_insights(
+                    include_analyzed=include_analyzed,
+                    batch_size=batch_size,
+                    use_similarity_batching=use_similarity,
+                    similarity_threshold=similarity_threshold
+                )
+                st.session_state['insights'] = insights
+                logger.info("Insights updated in session state")
+
+        if 'insights' in st.session_state:
+            st.markdown(f"**Last Updated:** {st.session_state['insights']['last_updated']}")
+            
+            # Display analysis statistics
+            stats = st.session_state['insights']['analysis_stats']
+            st.markdown("### 📊 Analysis Statistics")
+            st.markdown(f"""
+            - Total Emails: {stats.get('total_emails', 0)}
+            - Emails Analyzed: {stats.get('analyzed_emails', 0)}
+            - Emails Referenced: {stats.get('referenced_emails', 0)}
+            - Batches Processed: {stats.get('batches_processed', 0)}
+            - Batching Method: {stats.get('batching_method', 'N/A')}
+            """)
+            
+            with st.expander("Procedural Deviations", expanded=True):
+                st.write(st.session_state['insights']['procedural_deviations'])
+            
+            with st.expander("Recurrence Indicators", expanded=True):
+                st.write(st.session_state['insights']['recurrence_indicators'])
+            
+            with st.expander("Systemic Trends", expanded=True):
+                st.write(st.session_state['insights']['systemic_trends'])
+
+    # Middle Column - Data Management
+    with col2:
+        st.subheader('📥 Data Management')
+        
+        # Import Section
+        bulk_email_json = st.text_area(
+            label="Paste email JSON",
+            height=100,
+            key="bulk_email_json"
+        )
+        
+        if st.button('Import Emails'):
+            if bulk_email_json:
+                try:
+                    emails_data = json.loads(bulk_email_json)
+                    if not isinstance(emails_data, list):
+                        emails_data = [emails_data]
+                    
+                    with st.spinner('Importing emails...'):
+                        success_count, error_count, error_messages = store_multiple_emails(emails_data)
+                        st.success(f'✅ Imported {success_count} emails!')
+                        if error_count > 0:
+                            st.error(f'❌ Failed to import {error_count} emails')
+                            for error in error_messages:
+                                st.error(error)
+                except Exception as e:
+                    st.error(f'Error processing import: {str(e)}')
+            else:
+                st.warning('Please paste email JSON data to import.')
     
     # Clear Section
     if st.button('🗑️ Clear All Data', type='primary', help='Warning: This will permanently delete all emails and analysis data'):
