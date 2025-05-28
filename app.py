@@ -2,36 +2,15 @@ import os
 os.environ["STREAMLIT_WATCHER_PATCH_MODULES"] = "false"
 
 import streamlit as st
-# Set page config must be the first Streamlit command
-st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
-
-import duckdb
-import json
-from datetime import datetime, timedelta
-import os
-from groq import Groq
-import requests
-from dotenv import load_dotenv
-import logging
+import psutil
+import socket
 import sys
-import re
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-import concurrent.futures
-from functools import partial
 import time
+from pathlib import Path
+import logging
 import re
-from bs4 import BeautifulSoup
-import html2text
-from typing import Dict, Any
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
-import numpy as np
-import plotly.express as px
-import pandas as pd
 
-# Configure logging
+# Configure logging first
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -42,31 +21,193 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Add process lock mechanism
+def is_process_running(port=8502):
+    """Check if another instance is running on the same port"""
+    try:
+        # Try to create a socket on the Streamlit port
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(1)
+        result = sock.connect_ex(('127.0.0.1', port))
+        sock.close()
+        if result == 0:
+            logger.info(f"Port {port} is in use")
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error checking port: {str(e)}")
+        return False
+
+def kill_existing_processes():
+    """Kill any existing Python processes running this app"""
+    current_pid = os.getpid()
+    killed_processes = []
+    
+    # First, try to find and kill Streamlit processes
+    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+        try:
+            # Skip current process
+            if proc.pid == current_pid:
+                continue
+                
+            # Check if it's a Python process running our app
+            if proc.name().lower().startswith('python'):
+                cmdline = proc.cmdline()
+                if any('streamlit' in cmd.lower() for cmd in cmdline) and any('app.py' in cmd for cmd in cmdline):
+                    logger.info(f"Found existing Streamlit process (PID: {proc.pid}), attempting graceful shutdown...")
+                    try:
+                        # Try graceful termination first
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=3)  # Wait up to 3 seconds
+                            logger.info(f"Process {proc.pid} terminated gracefully")
+                            killed_processes.append(proc.pid)
+                        except psutil.TimeoutExpired:
+                            # Force kill if graceful termination fails
+                            logger.warning(f"Process {proc.pid} did not terminate gracefully, force killing...")
+                            proc.kill()
+                            killed_processes.append(proc.pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                        logger.warning(f"Could not terminate process {proc.pid}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error processing PID {proc.pid}: {str(e)}")
+            continue
+    
+    # Wait for port to be released with exponential backoff
+    max_wait = 15  # Maximum seconds to wait
+    wait_interval = 0.5  # Initial wait interval
+    waited = 0
+    attempts = 0
+    
+    while is_process_running() and waited < max_wait:
+        time.sleep(wait_interval)
+        waited += wait_interval
+        attempts += 1
+        # Exponential backoff
+        wait_interval = min(wait_interval * 1.5, 2.0)
+        logger.info(f"Waiting for port to be released... (attempt {attempts}, {waited:.1f}s)")
+    
+    if waited >= max_wait:
+        logger.error("Timeout waiting for port to be released")
+        return False
+    
+    if killed_processes:
+        logger.info(f"Successfully terminated {len(killed_processes)} processes: {killed_processes}")
+    else:
+        logger.info("No existing processes found to terminate")
+    
+    # Additional verification that port is actually free
+    if is_process_running():
+        logger.error("Port is still in use after process termination")
+        return False
+    
+    return True
+
+# Check for existing processes before starting
+if is_process_running():
+    logger.warning("Another instance of the app is already running on port 8502")
+    if not kill_existing_processes():
+        logger.error("Failed to terminate existing processes. Please manually close any running instances.")
+        sys.exit(1)
+    logger.info("Successfully cleared existing processes, starting new instance...")
+    time.sleep(2)  # Additional wait to ensure clean startup
+
+# Set page config must be the first Streamlit command
+st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
+
+# Add port configuration for Streamlit
+os.environ["STREAMLIT_SERVER_PORT"] = "8502"
+
+import duckdb
+import json
+from datetime import datetime, timedelta
+import os
+from groq import Groq
+import requests
+from dotenv import load_dotenv
+import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import concurrent.futures
+from functools import partial
+import re
+from bs4 import BeautifulSoup
+import html2text
+from typing import Dict, Any
+import chromadb
+from chromadb.config import Settings
+from chromadb.utils import embedding_functions
+import numpy as np
+import plotly.express as px
+import pandas as pd
+import psutil
+
 # Load environment variables only once
 if 'env_loaded' not in st.session_state:
-    load_dotenv()
+    # Force reload of environment variables
+    load_dotenv(override=True)
     st.session_state.env_loaded = True
     logger.info("Environment variables loaded")
+    
+    # Clear any cached clients
+    if 'groq_client' in st.session_state:
+        del st.session_state.groq_client
+    if 'clients_initialized' in st.session_state:
+        del st.session_state.clients_initialized
+    
+    # Add debug logging for API keys
+    groq_key = os.getenv('GROQ_API_KEY')
+    if groq_key:
+        # Log only first 4 and last 4 characters for security
+        masked_key = f"{groq_key[:4]}...{groq_key[-4:]}" if len(groq_key) > 8 else "***"
+        logger.info(f"Groq API key loaded (masked): {masked_key}")
+    else:
+        logger.error("Groq API key not found in environment variables")
 
 # Model configurations
 DEEPSEEK_API_BASE = os.getenv('DEEPSEEK_API_BASE', 'https://api.deepseek.com')
 DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
-DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat')  # Default DeepSeek model
+DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat').strip()  # Remove any whitespace
 GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
+
+# Helper function to safely parse environment variables
+def safe_env_int(var_name, default):
+    value = os.getenv(var_name, str(default))
+    # Remove any comments (everything after #) and strip whitespace
+    value = value.split('#')[0].strip()
+    # Remove any trailing comments in parentheses
+    value = re.sub(r'\s*\([^)]*\)', '', value)
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning(f"Invalid value for {var_name}: {value}, using default: {default}")
+        return default
+
+def safe_env_float(var_name, default):
+    value = os.getenv(var_name, str(default))
+    # Remove any comments (everything after #) and strip whitespace
+    value = value.split('#')[0].strip()
+    # Remove any trailing comments in parentheses
+    value = re.sub(r'\s*\([^)]*\)', '', value)
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning(f"Invalid value for {var_name}: {value}, using default: {default}")
+        return default
 
 # Query model configurations
 QUERY_MODEL_CONFIGS = {
     'deepseek': {
         'name': DEEPSEEK_MODEL,
-        'max_tokens': int(os.getenv('DEEPSEEK_MAX_TOKENS', 8192)),
-        'temperature': float(os.getenv('DEEPSEEK_TEMPERATURE', 0.5))
+        'max_tokens': safe_env_int('DEEPSEEK_MAX_TOKENS', 8192),
+        'temperature': safe_env_float('DEEPSEEK_TEMPERATURE', 0.5)
     },
     'groq': {
         'name': GROQ_MODEL,
-        'max_tokens': int(os.getenv('GROQ_MAX_TOKENS', 8192)),
-        'temperature': float(os.getenv('GROQ_TEMPERATURE', 0.5)),
-        'top_p': float(os.getenv('GROQ_TOP_P', 1)),
-        'frequency_penalty': float(os.getenv('GROQ_FREQUENCY_PENALTY', 0))
+        'max_tokens': safe_env_int('GROQ_MAX_TOKENS', 8192),
+        'temperature': safe_env_float('GROQ_TEMPERATURE', 0.5),
+        'top_p': safe_env_float('GROQ_TOP_P', 1),
+        'frequency_penalty': safe_env_float('GROQ_FREQUENCY_PENALTY', 0)
     }
 }
 
@@ -101,15 +242,89 @@ SEVERITY_LEVELS = ["Low", "Medium", "High"]
 CHROMA_PERSIST_DIR = "chroma_db"
 CHROMA_COLLECTION_NAME = "email_summaries"
 
+# Initialize database connection only once
+if 'db_initialized' not in st.session_state:
+    try:
+        # Get database connection without deleting existing data
+        conn = duckdb.connect(DB_PATH)
+        
+        # Check if tables exist and create them if they don't
+        try:
+            # Check if emails table exists
+            table_exists = conn.execute("""
+                SELECT name 
+                FROM sqlite_master 
+                WHERE type='table' AND name='emails'
+            """).fetchone()
+            
+            if not table_exists:
+                logger.info("Creating new database tables")
+                # Create tables with correct schema
+                conn.execute("""
+                    CREATE TABLE emails (
+                        id BIGINT PRIMARY KEY,
+                        email_subject TEXT,
+                        email_text_body TEXT,
+                        email_to TEXT,
+                        email_from TEXT,
+                        incident_type TEXT,
+                        severity TEXT,
+                        is_analyzed BOOLEAN DEFAULT FALSE,
+                        analyzed_at TIMESTAMP DEFAULT NULL,
+                        summary TEXT,
+                        analysis_quality FLOAT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
+                conn.execute("""
+                    CREATE TABLE email_analysis (
+                        id BIGINT PRIMARY KEY,
+                        email_id BIGINT,
+                        procedural_deviations TEXT,
+                        recurrence_indicators TEXT,
+                        systemic_trends TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (email_id) REFERENCES emails(id)
+                    )
+                """)
+
+                conn.execute("""
+                    CREATE TABLE query_cache (
+                        id BIGINT PRIMARY KEY,
+                        query_text TEXT,
+                        response_text TEXT,
+                        context_size BIGINT,
+                        model_name TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(query_text, context_size, model_name)
+                    )
+                """)
+                logger.info("Database tables created successfully")
+            else:
+                logger.info("Using existing database tables")
+            
+            st.session_state.conn = conn
+            st.session_state.db_initialized = True
+            logger.info("Database initialized successfully")
+        except Exception as e:
+            logger.error(f"Error checking/creating database tables: {str(e)}")
+            st.error("Failed to initialize database. Please check the logs for details.")
+            st.stop()
+    except Exception as e:
+        logger.error(f"Error initializing database: {str(e)}")
+        st.error("Failed to initialize database. Please check the logs for details.")
+        st.stop()
+
 # Initialize ChromaDB client
 if 'chroma_client' not in st.session_state:
     try:
-        # Create persistent client
+        # Create persistent client without deleting existing collection
         st.session_state.chroma_client = chromadb.PersistentClient(
             path=CHROMA_PERSIST_DIR,
             settings=Settings(
                 anonymized_telemetry=False,
-                allow_reset=True
+                allow_reset=False  # Changed to False to prevent automatic reset
             )
         )
         
@@ -131,7 +346,7 @@ if 'chroma_client' not in st.session_state:
                 metadata={"description": "Email summaries and analysis results"}
             )
         
-        logger.info("ChromaDB client and collection initialized successfully with default embedding function")
+        logger.info("ChromaDB client and collection initialized successfully")
     except Exception as e:
         logger.error(f"Error initializing ChromaDB: {str(e)}")
         st.error("Failed to initialize vector database. Please check the logs for details.")
@@ -145,88 +360,112 @@ except Exception as e:
     st.error("Failed to access vector database. Please check the logs for details.")
     st.stop()
 
-def get_db_connection():
-    """Get or create database connection"""
-    if 'conn' not in st.session_state:
-        st.session_state.conn = duckdb.connect(DB_PATH)  # Use global DB_PATH
-    return st.session_state.conn
-
 def init_database():
-    """Initialize database tables if they don't exist"""
+    """Initialize the database and create tables if they don't exist"""
+    conn = None
     try:
-        # Start a transaction
-        conn = get_db_connection()
-        conn.execute("BEGIN TRANSACTION")
+        # Create a new connection
+        conn = duckdb.connect(DB_PATH)
         
+        # Check if table exists and has correct schema
         try:
-            # Check if tables exist before creating them
-            tables_exist = conn.execute("""
-                SELECT COUNT(*) 
-                FROM information_schema.tables 
-                WHERE table_name IN ('emails', 'analysis_results_new', 'query_cache')
-            """).fetchone()[0] > 0
-
-            if not tables_exist:
-                logger.info("Creating new database tables")
-                # Create emails table with enhanced columns
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS emails (
-                        id INTEGER PRIMARY KEY,
-                        email_subject VARCHAR,
-                        email_text_body TEXT,
-                        email_to VARCHAR,
-                        email_from VARCHAR,
-                        incident_type VARCHAR,
-                        severity VARCHAR,
-                        is_analyzed BOOLEAN DEFAULT FALSE,
-                        analyzed_at TIMESTAMP DEFAULT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-
-                # Create analysis results table
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS analysis_results_new (
-                        id INTEGER PRIMARY KEY,
-                        email_id INTEGER,
-                        procedural_deviations TEXT,
-                        recurrence_indicators TEXT,
-                        systemic_trends TEXT,
-                        analysis_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (email_id) REFERENCES emails(id)
-                    )
-                ''')
-
-                # Create query cache table
-                conn.execute('''
-                    CREATE TABLE IF NOT EXISTS query_cache (
-                        id INTEGER PRIMARY KEY,
-                        query_text TEXT,
-                        response_text TEXT,
-                        context_size INTEGER,
-                        model_used VARCHAR,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        last_accessed TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        access_count INTEGER DEFAULT 0
-                    )
-                ''')
-                logger.info("Database tables created successfully")
-            else:
-                logger.info("Database tables already exist, preserving data")
+            # Get current columns
+            current_columns = conn.execute("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns 
+                WHERE table_name = 'emails'
+            """).fetchall()
+            current_column_names = [col[0] for col in current_columns]
             
-            # Commit the transaction
-            conn.execute("COMMIT")
-            return True
+            # Define expected columns
+            expected_columns = {
+                'id', 'email_subject', 'email_text_body', 'email_to', 'email_from',
+                'incident_type', 'severity', 'is_analyzed', 'analyzed_at',
+                'summary', 'analysis_quality', 'created_at'
+            }
             
+            # If table exists but schema doesn't match, drop and recreate
+            if current_columns and not expected_columns.issubset(set(current_column_names)):
+                logger.info("Schema mismatch detected, recreating tables...")
+                conn.execute("DROP TABLE IF EXISTS email_analysis")  # Drop dependent table first
+                conn.execute("DROP TABLE IF EXISTS emails")
+                conn.execute("DROP TABLE IF EXISTS query_cache")
+                logger.info("Old tables dropped")
         except Exception as e:
-            # Rollback on any error
-            conn.execute("ROLLBACK")
-            logger.error(f"Error initializing database schema: {str(e)}")
-            return False
+            logger.warning(f"Error checking schema, will create new tables: {str(e)}")
+            # If we can't check schema, drop tables to be safe
+            conn.execute("DROP TABLE IF EXISTS email_analysis")
+            conn.execute("DROP TABLE IF EXISTS emails")
+            conn.execute("DROP TABLE IF EXISTS query_cache")
+        
+        # Create tables with correct schema - using BIGINT consistently
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS emails (
+                id BIGINT PRIMARY KEY,
+                email_subject TEXT,
+                email_text_body TEXT,
+                email_to TEXT,
+                email_from TEXT,
+                incident_type TEXT,
+                severity TEXT,
+                is_analyzed BOOLEAN DEFAULT FALSE,
+                analyzed_at TIMESTAMP DEFAULT NULL,
+                summary TEXT,
+                analysis_quality FLOAT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS email_analysis (
+                id BIGINT PRIMARY KEY,
+                email_id BIGINT,  -- Changed to BIGINT to match emails.id
+                procedural_deviations TEXT,
+                recurrence_indicators TEXT,
+                systemic_trends TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (email_id) REFERENCES emails(id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS query_cache (
+                id BIGINT PRIMARY KEY,  -- Changed to BIGINT for consistency
+                query_text TEXT,
+                response_text TEXT,
+                context_size BIGINT,  -- Changed to BIGINT for consistency
+                model_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(query_text, context_size, model_name)
+            )
+        """)
+            
+        logger.info("Database tables initialized with correct schema")
+        return conn  # Return the connection object
             
     except Exception as e:
-        logger.error(f"Error in database transaction: {str(e)}")
-        return False
+        logger.error(f"Error initializing database: {str(e)}")
+        if conn is not None:
+            try:
+                conn.close()
+            except:
+                pass
+        return None  # Return None on error
+
+def get_db_connection():
+    """Get a database connection, creating one if it doesn't exist"""
+    try:
+        if 'conn' not in st.session_state or st.session_state.conn is None:
+            logger.info("No active database connection, initializing new one")
+            conn = init_database()
+            if conn is None:
+                logger.error("Failed to initialize database connection")
+                return None
+            st.session_state.conn = conn
+        return st.session_state.conn
+    except Exception as e:
+        logger.error(f"Error getting database connection: {str(e)}")
+        return None
 
 def get_available_deepseek_models():
     """Get list of available models from DeepSeek API"""
@@ -256,59 +495,164 @@ def get_available_deepseek_models():
 
 # Initialize database connection only once
 if 'db_initialized' not in st.session_state:
-    if not init_database():
-        logger.error("Failed to initialize database")
+    # Force reinitialize database to ensure correct schema
+    try:
+        # First, try to delete the database file if it exists
+        if os.path.exists(DB_PATH):
+            try:
+                # Close any existing connections
+                if 'conn' in st.session_state and st.session_state.conn is not None:
+                    try:
+                        st.session_state.conn.close()
+                    except:
+                        pass
+                    st.session_state.conn = None
+                
+                # Small delay to ensure connections are closed
+                time.sleep(0.5)
+                
+                # Delete the database file
+                os.remove(DB_PATH)
+                logger.info(f"Deleted existing database file {DB_PATH}")
+            except Exception as e:
+                logger.error(f"Error deleting database file: {str(e)}")
+                st.error("Failed to initialize database. Please check the logs for details.")
+                st.stop()
+        
+        # Create a new connection with a fresh database
+        conn = duckdb.connect(DB_PATH)
+        
+        # Create tables with correct schema
+        conn.execute("""
+            CREATE TABLE emails (
+                id BIGINT PRIMARY KEY,
+                email_subject TEXT,
+                email_text_body TEXT,
+                email_to TEXT,
+                email_from TEXT,
+                incident_type TEXT,
+                severity TEXT,
+                is_analyzed BOOLEAN DEFAULT FALSE,
+                analyzed_at TIMESTAMP DEFAULT NULL,
+                summary TEXT,
+                analysis_quality FLOAT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE email_analysis (
+                id BIGINT PRIMARY KEY,
+                email_id BIGINT,
+                procedural_deviations TEXT,
+                recurrence_indicators TEXT,
+                systemic_trends TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (email_id) REFERENCES emails(id)
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE query_cache (
+                id BIGINT PRIMARY KEY,
+                query_text TEXT,
+                response_text TEXT,
+                context_size BIGINT,
+                model_name TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(query_text, context_size, model_name)
+            )
+        """)
+        
+        st.session_state.conn = conn
+        st.session_state.db_initialized = True
+        logger.info("Database initialized with correct schema")
+    except Exception as e:
+        logger.error(f"Error initializing database: {str(e)}")
         st.error("Failed to initialize database. Please check the logs for details.")
         st.stop()
-    st.session_state.db_initialized = True
-    logger.info("Database initialized")
 
 # Initialize clients only once using session state
 if 'clients_initialized' not in st.session_state:
-    st.session_state.groq_client = Groq(
-        api_key=os.getenv('GROQ_API_KEY')
-    )
-    st.session_state.clients_initialized = True
+    # Force reload of environment variables before client initialization
+    load_dotenv(override=True)
+    groq_key = os.getenv('GROQ_API_KEY')
     
-    # Get available DeepSeek models
-    available_models = get_available_deepseek_models()
-    if available_models:
-        logger.info(f"Found {len(available_models)} available DeepSeek models")
-        # Update DEEPSEEK_MODEL if the current one isn't available
-        if DEEPSEEK_MODEL not in available_models and available_models:
-            DEEPSEEK_MODEL = available_models[0]  # Use the first available model
-            logger.info(f"Updated DeepSeek model to: {DEEPSEEK_MODEL}")
+    # Initialize Groq client
+    if groq_key:
+        try:
+            st.session_state.groq_client = Groq(api_key=groq_key)
+            # Test the client with a minimal request
+            test_response = st.session_state.groq_client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=5
+            )
+            st.session_state.groq_available = True
+            logger.info("Groq client initialized and tested successfully")
+        except Exception as e:
+            logger.error(f"Error initializing Groq client: {str(e)}")
+            st.session_state.groq_available = False
+            st.warning("Groq API is not available. Will use DeepSeek for queries.")
     else:
-        logger.warning("Could not fetch available DeepSeek models")
+        logger.warning("Groq API key not found in environment variables")
+        st.session_state.groq_available = False
+        st.warning("Groq API key not found. Will use DeepSeek for queries.")
     
+    # Initialize DeepSeek model
+    try:
+        available_models = get_available_deepseek_models()
+        if available_models:
+            logger.info(f"Found {len(available_models)} available DeepSeek models")
+            # Prefer deepseek-chat if available, otherwise use the first model
+            if 'deepseek-chat' in available_models:
+                st.session_state.deepseek_model = 'deepseek-chat'
+                logger.info("Using deepseek-chat model")
+            else:
+                st.session_state.deepseek_model = available_models[0]
+                logger.info(f"Using fallback model: {available_models[0]}")
+        else:
+            logger.warning("Could not fetch available DeepSeek models, using default")
+            st.session_state.deepseek_model = 'deepseek-chat'
+    except Exception as e:
+        logger.error(f"Error initializing DeepSeek model: {str(e)}")
+        st.session_state.deepseek_model = 'deepseek-chat'
+    
+    st.session_state.clients_initialized = True
     logger.info("Clients initialized")
 
-# Use session state clients
-groq_client = st.session_state.groq_client
+# Use session state clients and model
+groq_client = st.session_state.get('groq_client')
+groq_available = st.session_state.get('groq_available', False)
+DEEPSEEK_MODEL = st.session_state.deepseek_model
 
-# Use session state connection
-conn = st.session_state.conn
+# Get database connection - use get_db_connection() instead of direct access
+conn = get_db_connection()
+if conn is None:
+    logger.error("Failed to get database connection")
+    st.error("Failed to get database connection. Please check the logs for details.")
+    st.stop()
 
 # Increase context size limit for better coverage
 MAX_CONTEXT_SIZE = 30000  # Increased from 15000
 MAX_EMAILS_PER_CONTEXT = 50  # Increased from 16
 
 def get_deepseek_model_config():
-    """Get the DeepSeek model configuration, ensuring we use a valid model"""
+    """Get the DeepSeek model configuration"""
     return {
         'name': DEEPSEEK_MODEL,  # Always use the configured DeepSeek model
-        'max_tokens': int(os.getenv('DEEPSEEK_MAX_TOKENS', 8192)),
-        'temperature': float(os.getenv('DEEPSEEK_TEMPERATURE', 0.5))
+        'max_tokens': safe_env_int('DEEPSEEK_MAX_TOKENS', 8192),
+        'temperature': safe_env_float('DEEPSEEK_TEMPERATURE', 0.5)
     }
 
 def get_groq_model_config():
     """Get the Groq model configuration"""
     return {
         'name': GROQ_MODEL,
-        'max_tokens': int(os.getenv('GROQ_MAX_TOKENS', 8192)),
-        'temperature': float(os.getenv('GROQ_TEMPERATURE', 0.5)),
-        'top_p': float(os.getenv('GROQ_TOP_P', 1)),
-        'frequency_penalty': float(os.getenv('GROQ_FREQUENCY_PENALTY', 0))
+        'max_tokens': safe_env_int('GROQ_MAX_TOKENS', 8192),
+        'temperature': safe_env_float('GROQ_TEMPERATURE', 0.5),
+        'top_p': safe_env_float('GROQ_TOP_P', 1),
+        'frequency_penalty': safe_env_float('GROQ_FREQUENCY_PENALTY', 0)
     }
 
 # Query model configurations - use functions to ensure fresh configs
@@ -317,7 +661,7 @@ QUERY_MODEL_CONFIGS = {
     'groq': get_groq_model_config
 }
 
-def get_deepseek_response(messages, model_config):
+def get_deepseek_response(messages, model_config, model_name):
     """Make a request to DeepSeek API directly"""
     try:
         headers = {
@@ -329,8 +673,7 @@ def get_deepseek_response(messages, model_config):
         api_url = f"{DEEPSEEK_API_BASE}/v1/chat/completions"
         logger.info(f"Making DeepSeek API request to {api_url}")
         
-        # Always use the DeepSeek model
-        model_name = DEEPSEEK_MODEL
+        # Use the provided model name
         logger.info(f"Using DeepSeek model: {model_name}")
         
         # Only include supported parameters
@@ -429,7 +772,7 @@ def check_model_availability(model_name):
         logger.warning(f"Model {model_name} not available: {str(e)}")
         return False
 
-def summarize_emails_bulk(batch):
+def summarize_emails_bulk(batch, model_name):
     """Summarize multiple emails in a single LLM call - Uses DeepSeek API directly"""
     try:
         # Prepare context with all emails in the batch
@@ -461,7 +804,8 @@ def summarize_emails_bulk(batch):
                 7. Format: 'Email ID X: [Your one-sentence summary]'"""},
                 {"role": "user", "content": context}
             ],
-            model_config=model_config
+            model_config=model_config,
+            model_name=model_name  # Pass model name directly
         )
         
         # Parse the response to extract summaries
@@ -539,7 +883,7 @@ def clean_html_to_text(html):
     # Re-join into clean text
     return "\n".join(filtered)
 
-def analyze_email_content(subject: str, body: str) -> Dict[str, Any]:
+def analyze_email_content(subject: str, body: str, model_name: str) -> Dict[str, Any]:
     """Use LLM to analyze email content and extract incident type and severity"""
     try:
         # Prepare a more detailed prompt for the LLM
@@ -596,7 +940,8 @@ def analyze_email_content(subject: str, body: str) -> Dict[str, Any]:
                 5. Consider both immediate and potential impacts"""},
                 {"role": "user", "content": prompt}
             ],
-            model_config=model_config
+            model_config=model_config,
+            model_name=model_name
         )
 
         # Parse the structured response using regex
@@ -664,7 +1009,7 @@ def analyze_email_content(subject: str, body: str) -> Dict[str, Any]:
         }
 
 def store_email(email_data):
-    """Store email in both DuckDB and ChromaDB with permanent embeddings"""
+    """Store email in DuckDB and only its summary in ChromaDB"""
     try:
         email = email_data['Email']
         # Extract HTML and convert to clean text
@@ -677,15 +1022,21 @@ def store_email(email_data):
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM emails").fetchone()[0]
         
+        # Get model name from session state
+        model_name = st.session_state.deepseek_model
+        
         # Analyze email content using LLM
-        analysis = analyze_email_content(email['Subject'], text_body)
+        analysis = analyze_email_content(email['Subject'], text_body, model_name)
+        
+        # Generate summary for the email
+        summary = summarize_emails_bulk([(next_id, text_body, email['Subject'])], model_name)[next_id]
         
         # Store the email in DuckDB
         conn.execute('''
             INSERT INTO emails (
                 id, email_subject, email_text_body, email_to, email_from,
-                incident_type, severity, is_analyzed, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, CURRENT_TIMESTAMP)
+                incident_type, severity, is_analyzed, summary, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, FALSE, ?, CURRENT_TIMESTAMP)
         ''', (
             next_id,
             email['Subject'],
@@ -693,20 +1044,18 @@ def store_email(email_data):
             email['To'],
             email['From'],
             analysis['incident_type'],
-            analysis['severity']
+            analysis['severity'],
+            summary  # Store summary in DuckDB as well
         ))
         
-        # Generate summary for the email
-        summary = summarize_emails_bulk([(next_id, text_body, email['Subject'])])[next_id]
-        
-        # Store in ChromaDB permanently
+        # Store only the summary in ChromaDB
         try:
             current_time = datetime.now()
             email_collection.add(
-                documents=[summary],
+                documents=[summary],  # Only store the summary
                 metadatas=[{
                     'email_id': next_id,
-                    'subject': email['Subject'],
+                    'subject': email['Subject'],  # Keep subject for reference
                     'incident_type': analysis['incident_type'],
                     'severity': analysis['severity'],
                     'created_at': current_time.isoformat(),
@@ -715,7 +1064,7 @@ def store_email(email_data):
                 }],
                 ids=[str(next_id)]
             )
-            logger.info(f"Stored email {next_id} in ChromaDB with embedding")
+            logger.info(f"Stored summary for email {next_id} in ChromaDB with embedding")
         except Exception as e:
             logger.error(f"Error storing in ChromaDB: {str(e)}")
             # Continue even if ChromaDB storage fails - we still have the email in DuckDB
@@ -819,7 +1168,7 @@ def create_similarity_batches(emails, batch_size=10, similarity_threshold=0.7):
     logger.info(f"Created {len(batches)} similarity-based batches")
     return batches
 
-def process_batch(batch, batch_num, total_batches):
+def process_batch(batch, batch_num, total_batches, model_name):
     """Process a single batch of emails - Uses DeepSeek API directly"""
     try:
         # Use a separate logger for thread operations to avoid Streamlit context issues
@@ -835,7 +1184,7 @@ def process_batch(batch, batch_num, total_batches):
         thread_logger.info(f"Processing batch {batch_num} of {total_batches}")
         
         # Get bulk summaries for all emails in the batch
-        summaries = summarize_emails_bulk(batch)
+        summaries = summarize_emails_bulk(batch, model_name)
         
         # Prepare context from summarized emails - more concise format
         context = "Maintenance and service emails:\n"
@@ -878,7 +1227,8 @@ def process_batch(batch, batch_num, total_batches):
                 {"role": "system", "content": "You are an expert at analyzing maintenance and service-related emails. You MUST follow the exact format specified in the prompt, including exactly 1 bullet point per section. Keep each bullet point to ONE sentence and focus on the most critical issue."},
                 {"role": "user", "content": prompt}
             ],
-            model_config=model_config
+            model_config=model_config,
+            model_name=model_name
         )
         
         # Parse the response
@@ -902,37 +1252,122 @@ def process_batch(batch, batch_num, total_batches):
             thread_logger.error(f"Response text: {response}")
             return None
 
-        # Store analysis results for each email in the batch
-        for id, _, _ in batch:
-            # Map old section names to new ones for database storage
-            pd = section_map.get("PROCEDURAL DEVIATIONS", "") or ""
-            ri = section_map.get("RECURRENCE INDICATORS", "") or ""
-            st = section_map.get("SYSTEMIC TRENDS", "") or ""
+        # Store analysis results for each email in the batch using a transaction
+        thread_conn = None
+        try:
+            thread_conn = duckdb.connect(DB_PATH)
+            thread_conn.execute("BEGIN TRANSACTION")
             
-            # Use a separate database connection for each thread
-            try:
-                thread_conn = duckdb.connect(DB_PATH)
+            for id, _, _ in batch:
+                # Map old section names to new ones for database storage
+                pd = section_map.get("PROCEDURAL DEVIATIONS", "") or ""
+                ri = section_map.get("RECURRENCE INDICATORS", "") or ""
+                st = section_map.get("SYSTEMIC TRENDS", "") or ""
+                
+                # Check if analysis already exists for this email
+                existing_analysis = thread_conn.execute('''
+                    SELECT id FROM email_analysis WHERE email_id = ?
+                ''', (id,)).fetchone()
+                
+                if existing_analysis:
+                    # Update existing analysis
+                    thread_conn.execute('''
+                        UPDATE email_analysis 
+                        SET procedural_deviations = ?,
+                            recurrence_indicators = ?,
+                            systemic_trends = ?,
+                            created_at = CURRENT_TIMESTAMP
+                        WHERE email_id = ?
+                    ''', (pd, ri, st, id))
+                    thread_logger.info(f"Updated analysis results for email {id}")
+                else:
+                    # Insert new analysis
+                    thread_conn.execute('''
+                        INSERT INTO email_analysis 
+                        (id, email_id, procedural_deviations, recurrence_indicators, systemic_trends)
+                        VALUES (
+                            (SELECT COALESCE(MAX(id), 0) + 1 FROM email_analysis),
+                            ?, ?, ?, ?
+                        )
+                    ''', (id, pd, ri, st))
+                    thread_logger.info(f"Stored new analysis results for email {id}")
+                
+                # Update is_analyzed flag and analyzed_at timestamp
                 thread_conn.execute('''
-                    INSERT INTO analysis_results_new 
-                    (id, email_id, procedural_deviations, recurrence_indicators, systemic_trends)
-                    VALUES (
-                        (SELECT COALESCE(MAX(id), 0) + 1 FROM analysis_results_new),
-                        ?, ?, ?, ?
-                    )
-                ''', (id, pd, ri, st))
-                thread_logger.info(f"Stored analysis results for email {id}")
-                thread_conn.close()
+                    UPDATE emails 
+                    SET is_analyzed = TRUE, 
+                        analyzed_at = CURRENT_TIMESTAMP 
+                    WHERE id = ?
+                ''', (id,))
+                thread_logger.info(f"Updated analysis status for email {id}")
+            
+            # Commit the transaction
+            thread_conn.execute("COMMIT")
+            thread_logger.info(f"Successfully processed batch {batch_num}")
+            
+            # Update ChromaDB metadata for these emails
+            try:
+                # Get current metadata for these emails
+                results = email_collection.get(
+                    ids=[str(id) for id, _, _ in batch],
+                    include=["metadatas"]
+                )
+                
+                # Update metadata with is_analyzed=True
+                for metadata in results['metadatas']:
+                    metadata['is_analyzed'] = True
+                
+                # Update ChromaDB
+                email_collection.update(
+                    ids=[str(id) for id, _, _ in batch],
+                    metadatas=results['metadatas']
+                )
+                thread_logger.info(f"Updated ChromaDB metadata for batch {batch_num}")
             except Exception as e:
-                thread_logger.error(f"Error storing analysis results for email {id}: {str(e)}")
+                thread_logger.error(f"Error updating ChromaDB metadata: {str(e)}")
+                # Don't fail the whole batch if ChromaDB update fails
 
-        return section_map
+            return section_map
+            
+        except Exception as e:
+            if thread_conn is not None:
+                thread_conn.execute("ROLLBACK")
+            thread_logger.error(f"Error processing batch {batch_num}: {str(e)}")
+            return None
+        finally:
+            if thread_conn is not None:
+                try:
+                    thread_conn.close()
+                except:
+                    pass
     except Exception as e:
-        thread_logger.error(f"Error processing batch {batch_num}: {str(e)}")
+        thread_logger.error(f"Unexpected error in process_batch: {str(e)}")
         return None
 
 def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=False, similarity_threshold=0.7):
     """Get insights for emails using parallel batch processing"""
     logger.info("Starting insights generation")
+    
+    # Get the model name before starting threads
+    model_name = st.session_state.deepseek_model
+    
+    # Get database connection first
+    conn = get_db_connection()
+    if conn is None:
+        logger.error("Failed to get database connection")
+        return {
+            'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'procedural_deviations': 'Error: Could not connect to database',
+            'recurrence_indicators': 'Error: Could not connect to database',
+            'systemic_trends': 'Error: Could not connect to database',
+            'email_count': 0,
+            'analysis_stats': {
+                'total_emails': 0,
+                'analyzed_emails': 0,
+                'referenced_emails': 0,
+                'batches_processed': 0
+            }
+        }
     
     # Get emails based on include_analyzed flag
     query = '''
@@ -941,7 +1376,23 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
         WHERE is_analyzed = FALSE OR ? = TRUE
         ORDER BY id DESC
     '''
-    all_emails = conn.execute(query, [include_analyzed]).fetchall()
+    try:
+        all_emails = conn.execute(query, [include_analyzed]).fetchall()
+    except Exception as e:
+        logger.error(f"Error executing query: {str(e)}")
+        return {
+            'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'procedural_deviations': f'Error: {str(e)}',
+            'recurrence_indicators': f'Error: {str(e)}',
+            'systemic_trends': f'Error: {str(e)}',
+            'email_count': 0,
+            'analysis_stats': {
+                'total_emails': 0,
+                'analyzed_emails': 0,
+                'referenced_emails': 0,
+                'batches_processed': 0
+            }
+        }
     
     if not all_emails:
         logger.info("No emails found in database")
@@ -977,8 +1428,8 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
     # Use a smaller number of workers to avoid overwhelming the system
     max_workers = min(3, len(batches))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Create a partial function with the total number of batches
-        process_batch_partial = partial(process_batch, total_batches=len(batches))
+        # Create a partial function with the total number of batches and model name
+        process_batch_partial = partial(process_batch, total_batches=len(batches), model_name=model_name)
         
         # Submit all batches for processing
         future_to_batch = {
@@ -995,20 +1446,6 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
                     all_insights["PROCEDURAL DEVIATIONS"].extend(section_map["PROCEDURAL DEVIATIONS"].splitlines())
                     all_insights["RECURRENCE INDICATORS"].extend(section_map["RECURRENCE INDICATORS"].splitlines())
                     all_insights["SYSTEMIC TRENDS"].extend(section_map["SYSTEMIC TRENDS"].splitlines())
-                    
-                    # Mark unanalyzed emails in this batch as processed using a separate connection
-                    try:
-                        thread_conn = duckdb.connect(DB_PATH)
-                        unanalyzed_ids = [id for id, _, _ in batch if not include_analyzed]
-                        if unanalyzed_ids:
-                            thread_conn.execute('''
-                                UPDATE emails 
-                                SET is_analyzed = TRUE, analyzed_at = CURRENT_TIMESTAMP 
-                                WHERE id IN ({})
-                            '''.format(','.join('?' * len(unanalyzed_ids))), unanalyzed_ids)
-                        thread_conn.close()
-                    except Exception as e:
-                        logger.error(f"Error updating email status: {str(e)}")
             except Exception as e:
                 logger.error(f"Error processing batch result: {str(e)}")
 
@@ -1026,9 +1463,17 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
             if str(id) in section:
                 email_references[id] = email_references.get(id, 0) + 1
     
+    # Get final analysis stats
+    try:
+        conn = get_db_connection()
+        total_analyzed = conn.execute("SELECT COUNT(*) FROM emails WHERE is_analyzed = TRUE").fetchone()[0]
+    except Exception as e:
+        logger.error(f"Error getting analysis stats: {str(e)}")
+        total_analyzed = 0
+    
     analysis_stats = {
         'total_emails': len(all_emails),
-        'analyzed_emails': len([id for id, _, _ in all_emails if not include_analyzed]),
+        'analyzed_emails': total_analyzed,
         'referenced_emails': len(email_references),
         'batches_processed': len(batches),
         'batching_method': 'similarity' if use_similarity_batching else 'chronological'
@@ -1046,11 +1491,10 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
     }
 
 def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_quality=0.5):
-    """Get context from analyzed emails using permanent vector embeddings"""
+    """Get context from analyzed emails using permanent vector embeddings with hybrid category filtering"""
     try:
         # Calculate date threshold
         date_threshold = datetime.now() - timedelta(days=days_back)
-        # Convert to timestamp for ChromaDB comparison
         date_threshold_timestamp = int(date_threshold.timestamp())
         logger.info(f"Retrieving context with parameters: limit={limit}, days_back={days_back}, date_threshold={date_threshold.isoformat()}")
         
@@ -1073,7 +1517,11 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                 
                 logger.info(f"Found {len(recent_emails)} recent emails for potential fallback")
                 
-                # Query ChromaDB directly for similar summaries
+                # Determine relevant categories for the query
+                relevant_categories = determine_relevant_categories(query_text)
+                logger.info(f"Relevant categories for query: {relevant_categories}")
+                
+                # Query ChromaDB for similar summaries
                 logger.info("Querying ChromaDB for similar summaries...")
                 results = email_collection.query(
                     query_texts=[query_text],
@@ -1082,20 +1530,52 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                     include=["documents", "metadatas", "distances"]
                 )
                 
-                # Log ChromaDB query results
-                if results['documents'] and results['documents'][0]:
-                    logger.info(f"ChromaDB returned {len(results['documents'][0])} results")
-                    for i, (doc, metadata, distance) in enumerate(zip(results['documents'][0], results['metadatas'][0], results['distances'][0])):
-                        logger.info(f"Result {i+1}:")
-                        logger.info(f"  Email ID: {metadata['email_id']}")
-                        logger.info(f"  Subject: {metadata['subject']}")
-                        logger.info(f"  Incident Type: {metadata['incident_type']}")
-                        logger.info(f"  Severity: {metadata['severity']}")
-                        logger.info(f"  Similarity Score: {1 - distance:.2f}")
-                        logger.info(f"  Summary: {doc[:200]}...")
-                else:
+                if not results['documents'] or not results['documents'][0]:
                     logger.warning("No results from vector search, falling back to text search")
                     return get_fallback_context(recent_emails, query_text, limit, days_back)
+                
+                # Get email IDs from ChromaDB results
+                email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+                
+                # If we have 1-2 specific categories, filter the results
+                if 1 <= len(relevant_categories) <= 2:
+                    logger.info(f"Filtering results for specific categories: {relevant_categories}")
+                    # Get analysis results for these emails
+                    category_filtered_ids = conn.execute('''
+                        SELECT DISTINCT email_id 
+                        FROM email_analysis 
+                        WHERE email_id IN ({})
+                        AND (
+                            CASE 
+                                WHEN ? IN ('procedural_deviations') AND procedural_deviations != '' THEN TRUE
+                                WHEN ? IN ('recurrence_indicators') AND recurrence_indicators != '' THEN TRUE
+                                WHEN ? IN ('systemic_trends') AND systemic_trends != '' THEN TRUE
+                                ELSE FALSE
+                            END
+                        )
+                    '''.format(','.join('?' * len(email_ids))), 
+                    [*email_ids, *relevant_categories, *relevant_categories, *relevant_categories]).fetchall()
+                    
+                    category_filtered_ids = [row[0] for row in category_filtered_ids]
+                    logger.info(f"Found {len(category_filtered_ids)} emails matching specific categories")
+                    
+                    if category_filtered_ids:
+                        # Filter ChromaDB results to only include category-matched emails
+                        filtered_indices = [i for i, metadata in enumerate(results['metadatas'][0]) 
+                                         if int(metadata['email_id']) in category_filtered_ids]
+                        
+                        if filtered_indices:
+                            # Update results with filtered data
+                            results['documents'][0] = [results['documents'][0][i] for i in filtered_indices]
+                            results['metadatas'][0] = [results['metadatas'][0][i] for i in filtered_indices]
+                            results['distances'][0] = [results['distances'][0][i] for i in filtered_indices]
+                            logger.info(f"Filtered to {len(filtered_indices)} category-specific results")
+                        else:
+                            logger.info("No category-specific results found, using all results")
+                    else:
+                        logger.info("No category-specific matches found, using all results")
+                else:
+                    logger.info("Using all results (no specific category filtering)")
                 
                 # Get full email details from DuckDB
                 email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
@@ -1124,8 +1604,27 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                     email_detail = next((e for e in emails if e[0] == email_id), None)
                     if email_detail:
                         id, subject, body, inc_type, sev = email_detail
+                        
+                        # Get category-specific analysis if available
+                        analysis = conn.execute('''
+                            SELECT procedural_deviations, recurrence_indicators, systemic_trends
+                            FROM email_analysis
+                            WHERE email_id = ?
+                        ''', (id,)).fetchone()
+                        
+                        # Build category-specific summary if we have analysis
+                        category_summary = ""
+                        if analysis and 1 <= len(relevant_categories) <= 2:
+                            pd, ri, st = analysis
+                            if 'procedural_deviations' in relevant_categories and pd:
+                                category_summary += f"\nProcedural Deviations: {pd}"
+                            if 'recurrence_indicators' in relevant_categories and ri:
+                                category_summary += f"\nRecurrence Indicators: {ri}"
+                            if 'systemic_trends' in relevant_categories and st:
+                                category_summary += f"\nSystemic Trends: {st}"
+                        
                         email_content = f"""Email {id} (Similarity: {1 - distance:.2f}):
-{doc}
+{doc}{category_summary}
 Body Preview: {body[:200]}..."""
                         
                         email_size = len(email_content)
@@ -1138,6 +1637,8 @@ Body Preview: {body[:200]}..."""
                 # Build final context
                 context = f"Similar email summaries (showing {len(used_emails)} emails, {total_chars} chars)\n"
                 context += f"Query: {query_text}\n"
+                if 1 <= len(relevant_categories) <= 2:
+                    context += f"Focusing on categories: {', '.join(relevant_categories)}\n"
                 context += f"Analysis period: Last {days_back} days\n"
                 context += "\n".join(context_parts)
                 
@@ -1147,9 +1648,7 @@ Body Preview: {body[:200]}..."""
             except Exception as e:
                 logger.error(f"Error in vector search: {str(e)}")
                 logger.info("Falling back to text search due to vector search error")
-                # Fallback to simple text search if vector search fails
                 return get_fallback_context(recent_emails, query_text, limit, days_back)
-            
         else:
             # If no query text, get recent emails directly from DuckDB
             logger.info("No query text provided, retrieving recent emails")
@@ -1194,7 +1693,7 @@ Body Preview: {body[:200]}..."""
                 summary = summary_map.get(id)
                 if not summary:
                     logger.info(f"Generating new summary for email {id}")
-                    summary = summarize_emails_bulk([(id, body, subject)])[id]
+                    summary = summarize_emails_bulk([(id, body, subject)], model_name)[id]
                 else:
                     logger.info(f"Using stored summary for email {id}")
                 
@@ -1218,7 +1717,7 @@ Body Preview: {body[:200]}..."""
             
             logger.info(f"Final context built with {len(context_parts)} emails, {total_chars} total characters")
             return context, len(context_parts)
-            
+        
     except Exception as e:
         logger.error(f"Error getting email context: {str(e)}")
         return "Error retrieving email context. Please check the logs for details.", 0
@@ -1249,7 +1748,7 @@ def get_fallback_context(emails, query_text, limit, days_back):
             similarity = similarities[idx]
             
             # Generate summary for this email
-            summary = summarize_emails_bulk([(id, body, subject)])[id]
+            summary = summarize_emails_bulk([(id, body, subject)], model_name)[id]
             email_content = f"""Email {id} (Similarity: {similarity:.2f}):
 Subject: {subject}
 Incident Type: {inc_type}
@@ -1281,24 +1780,23 @@ def get_cached_query(query_text, context_size, model_name):
         cache_expiry = datetime.now() - timedelta(hours=24)
         
         result = conn.execute('''
-            SELECT response_text, access_count, created_at
+            SELECT response_text, created_at
             FROM query_cache
             WHERE query_text = ? 
             AND context_size = ?
-            AND model_used = ?
+            AND model_name = ?
             AND created_at > ?
-            ORDER BY last_accessed DESC
+            ORDER BY created_at DESC
             LIMIT 1
         ''', (query_text, context_size, model_name, cache_expiry)).fetchone()
         
         if result:
-            response_text, access_count, created_at = result
-            # Update access count and last accessed time
+            response_text, created_at = result
+            # Update the timestamp to refresh the cache
             conn.execute('''
                 UPDATE query_cache
-                SET access_count = access_count + 1,
-                    last_accessed = CURRENT_TIMESTAMP
-                WHERE query_text = ? AND context_size = ? AND model_used = ?
+                SET created_at = CURRENT_TIMESTAMP
+                WHERE query_text = ? AND context_size = ? AND model_name = ?
             ''', (query_text, context_size, model_name))
             return response_text
     except Exception as e:
@@ -1312,8 +1810,15 @@ def cache_query_result(query_text, response_text, context_size, model_name):
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM query_cache").fetchone()[0]
         
+        # First delete any existing cache entry for this query to avoid duplicates
         conn.execute('''
-            INSERT INTO query_cache (id, query_text, response_text, context_size, model_used)
+            DELETE FROM query_cache
+            WHERE query_text = ? AND context_size = ? AND model_name = ?
+        ''', (query_text, context_size, model_name))
+        
+        # Insert new cache entry
+        conn.execute('''
+            INSERT INTO query_cache (id, query_text, response_text, context_size, model_name)
             VALUES (?, ?, ?, ?, ?)
         ''', (next_id, query_text, response_text, context_size, model_name))
         logger.info(f"Cached query result for: {query_text[:50]}... using model {model_name}")
@@ -1385,16 +1890,15 @@ def get_similar_emails(query_text, limit=5):
 def query_llm_with_context(query_text, context, model_name='groq'):
     """
     Query the LLM with email context using the specified model.
-    
-    Args:
-        query_text (str): The user's query
-        context (str): The email context to use for answering
-        model_name (str): The model to use ('groq' or 'deepseek')
-        
-    Returns:
-        str: The LLM's response
+    Falls back to DeepSeek if Groq is unavailable.
     """
     try:
+        # If Groq is requested but not available, fall back to DeepSeek
+        if model_name == 'groq' and not groq_available:
+            logger.warning("Groq requested but not available, falling back to DeepSeek")
+            model_name = 'deepseek'
+            st.warning("Groq is not available. Using DeepSeek instead.")
+        
         # Get model config using the appropriate function
         model_config_fn = QUERY_MODEL_CONFIGS.get(model_name)
         if not model_config_fn:
@@ -1431,15 +1935,37 @@ def query_llm_with_context(query_text, context, model_name='groq'):
 
         # Get response from selected model
         logger.info(f"Querying {model_name} with context")
-        if model_name == 'groq':
-            response = get_groq_response(messages, model_config)
-        else:  # deepseek
-            response = get_deepseek_response(messages, model_config)
-        
-        # Cache the response
-        cache_query_result(query_text, response, len(context.split('\n')), model_name)
-        
-        return response
+        try:
+            if model_name == 'groq' and groq_available:
+                response = get_groq_response(messages, model_config)
+            else:  # deepseek
+                # Use the actual model name from session state for DeepSeek
+                actual_model_name = st.session_state.deepseek_model
+                logger.info(f"Using DeepSeek model: {actual_model_name}")
+                response = get_deepseek_response(messages, model_config, actual_model_name)
+            
+            # Cache the response
+            cache_query_result(query_text, response, len(context.split('\n')), model_name)
+            return response
+            
+        except Exception as e:
+            if model_name == 'groq':
+                logger.error(f"Error with Groq API: {str(e)}")
+                logger.info("Falling back to DeepSeek")
+                # Try DeepSeek as fallback
+                try:
+                    actual_model_name = st.session_state.deepseek_model
+                    logger.info(f"Using DeepSeek fallback model: {actual_model_name}")
+                    response = get_deepseek_response(messages, model_config, actual_model_name)
+                    # Cache the response with the fallback model
+                    cache_query_result(query_text, response, len(context.split('\n')), 'deepseek')
+                    return response
+                except Exception as fallback_error:
+                    logger.error(f"Fallback to DeepSeek also failed: {str(fallback_error)}")
+                    raise
+            else:
+                raise
+            
     except Exception as e:
         logger.error(f"Error querying LLM with context: {str(e)}")
         return f"Error processing your query: {str(e)}"
@@ -1476,25 +2002,64 @@ def get_db_size():
 
 # Add these functions before the UI code, in the correct order
 def reinitialize_database():
-    """Force reinitialization of the database"""
+    """Force reinitialization of the database more efficiently"""
     try:
         # Close current connection
         if 'conn' in st.session_state and st.session_state.conn is not None:
-            st.session_state.conn.close()
-            st.session_state.conn = None
+            try:
+                st.session_state.conn.execute("PRAGMA force_checkpoint")
+                st.session_state.conn.close()
+                logger.info("Database connection closed")
+            except Exception as e:
+                logger.warning(f"Error closing connection: {str(e)}")
+                try:
+                    st.session_state.conn.close()
+                    logger.info("Database connection closed (fallback)")
+                except Exception as close_error:
+                    logger.warning(f"Error in fallback connection close: {str(close_error)}")
+            finally:
+                st.session_state.conn = None
         
         # Delete the database file
         if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-            logger.info(f"Deleted database file {DB_PATH}")
+            try:
+                # Find and terminate processes holding the file
+                for proc in psutil.process_iter(['pid', 'name', 'open_files']):
+                    try:
+                        for file in proc.open_files():
+                            if DB_PATH in file.path:
+                                logger.info(f"Found process {proc.pid} ({proc.name()}) holding database file")
+                                proc.terminate()
+                                try:
+                                    proc.wait(timeout=2)
+                                    logger.info(f"Process {proc.pid} terminated gracefully")
+                                except psutil.TimeoutExpired:
+                                    logger.warning(f"Process {proc.pid} did not terminate gracefully, force killing...")
+                                    proc.kill()
+                                    proc.wait(timeout=1)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess) as e:
+                        logger.warning(f"Error checking process {proc.pid}: {str(e)}")
+                        continue
+                
+                time.sleep(0.5)
+                os.remove(DB_PATH)
+                logger.info(f"Deleted database file {DB_PATH}")
+            except Exception as e:
+                logger.error(f"Error deleting database file: {str(e)}")
+                return False
         
-        # Reinitialize database
-        if not init_database():
-            logger.error("Failed to reinitialize database")
+        # Create new connection and initialize
+        try:
+            st.session_state.conn = duckdb.connect(DB_PATH)
+            if not init_database():
+                logger.error("Failed to reinitialize database schema")
+                return False
+            logger.info("Database reinitialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error creating new database connection: {str(e)}")
             return False
-        
-        logger.info("Database reinitialized successfully")
-        return True
+            
     except Exception as e:
         logger.error(f"Error reinitializing database: {str(e)}")
         return False
@@ -1610,32 +2175,111 @@ def determine_relevant_categories(query_text):
     return [category for category, score in category_scores.items() if score > 0]
 
 def clear_emails_table():
-    """Clear both DuckDB and ChromaDB databases"""
+    """Clear all emails from the database and vector store"""
     try:
-        # Clear DuckDB
-        if 'conn' in st.session_state and st.session_state.conn is not None:
-            st.session_state.conn.close()
+        # First clear the ChromaDB collection to release any file handles
+        clear_vector_store()
+        
+        # Get current connection
+        conn = st.session_state.conn
+        if conn is not None:
+            try:
+                # Close connection properly without parameters
+                conn.execute("PRAGMA force_checkpoint")  # Remove TRUNCATE parameter
+                conn.close()
+                logger.info("Database connection closed")
+            except Exception as e:
+                logger.warning(f"Error closing database connection: {str(e)}")
+                # Try to close without PRAGMA if it fails
+                try:
+                    conn.close()
+                    logger.info("Database connection closed (fallback)")
+                except Exception as close_error:
+                    logger.warning(f"Error in fallback connection close: {str(close_error)}")
+            st.session_state.conn = None  # Clear session state connection
+        
+        # Small delay to ensure connections are fully closed
+        time.sleep(0.5)
+        
+        # Try to delete the database file with improved process handling
+        max_retries = 3
+        retry_delay = 1.0
+        db_path = 'emails.db'
+        
+        for attempt in range(max_retries):
+            try:
+                if os.path.exists(db_path):
+                    # Only check Python and Streamlit processes that might be using the file
+                    target_processes = []
+                    current_pid = os.getpid()
+                    
+                    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            # Skip current process
+                            if proc.pid == current_pid:
+                                continue
+                                
+                            # Only check Python and Streamlit processes
+                            if proc.name().lower() in ['python.exe', 'pythonw.exe', 'streamlit.exe']:
+                                cmdline = proc.cmdline()
+                                # Check if this is a process running our app
+                                if any('app.py' in cmd.lower() for cmd in cmdline):
+                                    target_processes.append(proc)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                            continue
+                    
+                    # Try to terminate target processes
+                    for proc in target_processes:
+                        try:
+                            logger.info(f"Found process {proc.pid} ({proc.name()}) that might be using the database")
+                            # Try graceful termination first
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2)  # Wait up to 2 seconds
+                                logger.info(f"Process {proc.pid} terminated gracefully")
+                            except psutil.TimeoutExpired:
+                                # Force kill if graceful termination fails
+                                logger.warning(f"Process {proc.pid} did not terminate gracefully, force killing...")
+                                proc.kill()
+                                proc.wait(timeout=1)
+                        except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                            logger.warning(f"Could not terminate process {proc.pid}: {str(e)}")
+                    
+                    # Additional delay after process termination
+                    time.sleep(0.5)
+                    
+                    # Now try to delete the file
+                    os.remove(db_path)
+                    logger.info("Database file deleted")
+                    break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Attempt {attempt + 1} failed to delete database: {str(e)}")
+                    time.sleep(retry_delay)
+                else:
+                    logger.error(f"Failed to delete database after {max_retries} attempts: {str(e)}")
+                    return False
+        
+        # Reinitialize the database
+        try:
+            new_conn = init_database()
+            if new_conn is None:
+                logger.error("Failed to reinitialize database")
+                return False
+            # Update session state only after successful initialization
+            st.session_state.conn = new_conn
+            logger.info("Database reinitialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error reinitializing database: {str(e)}")
+            # Ensure connection is None if initialization fails
             st.session_state.conn = None
-        
-        if os.path.exists(DB_PATH):
-            os.remove(DB_PATH)
-            logger.info(f"Deleted database file {DB_PATH}")
-        
-        # Clear ChromaDB
-        if not clear_vector_store():
-            logger.error("Failed to clear vector store")
             return False
-        
-        # Reinitialize database
-        st.session_state.conn = duckdb.connect(DB_PATH)
-        if not init_database():
-            logger.error("Failed to reinitialize database after clearing")
-            return False
-        
-        logger.info("Database and vector store cleared by user request")
-        return True
+            
     except Exception as e:
-        logger.error(f"Error clearing databases: {str(e)}")
+        logger.error(f"Error clearing emails table: {str(e)}")
+        # Ensure connection is None on any error
+        st.session_state.conn = None
         return False
 
 def update_email_embeddings(email_ids=None):
@@ -1678,7 +2322,7 @@ def update_email_embeddings(email_ids=None):
                 summaries = None
                 for attempt in range(max_retries):
                     try:
-                        summaries = summarize_emails_bulk(batch_data)
+                        summaries = summarize_emails_bulk(batch_data, st.session_state.deepseek_model)
                         # Verify summaries were generated properly
                         if all(summaries.get(id) and len(summaries[id].strip()) > 0 for id, _, _ in batch_data):
                             break
@@ -1757,18 +2401,15 @@ def update_email_embeddings(email_ids=None):
         return 0, 0
 
 def clear_vector_store():
-    """Clear the ChromaDB collection"""
+    """Clear the ChromaDB collection more efficiently"""
     try:
-        # Delete the collection
+        # Delete and recreate collection in one operation
         st.session_state.chroma_client.delete_collection(CHROMA_COLLECTION_NAME)
-        
-        # Recreate the collection
         st.session_state.email_collection = st.session_state.chroma_client.create_collection(
             name=CHROMA_COLLECTION_NAME,
             embedding_function=embedding_functions.DefaultEmbeddingFunction(),
             metadata={"description": "Email summaries and analysis results"}
         )
-        
         logger.info("ChromaDB collection cleared and recreated")
         return True
     except Exception as e:
@@ -1836,78 +2477,323 @@ with tab1:
     pass
 
 with tab2:
-    st.header("📈 Email Analytics")
+    st.header("📈 Email Analytics Dashboard")
     
-    # Load email data from ChromaDB
+    # Load email data from ChromaDB and DuckDB
     try:
+        # Get data from both sources for comprehensive analysis
         collection = st.session_state.chroma_client.get_collection("email_summaries")
         results = collection.get(include=["metadatas", "documents"])
         
-        if results['ids']:
-            # Convert to DataFrame
-            df = pd.DataFrame({
-                'id': results['ids'],
-                **{f'metadata_{k}': [d.get(k) for d in results['metadatas']] 
-                   for k in results['metadatas'][0].keys()},
-                'content': results['documents']
-            })
+        # Get additional data from DuckDB for more detailed analysis
+        conn = get_db_connection()
+        detailed_data = conn.execute('''
+            SELECT 
+                e.id,
+                e.email_subject,
+                e.email_text_body,
+                e.incident_type,
+                e.severity,
+                e.created_at,
+                e.is_analyzed,
+                e.analyzed_at,
+                ea.procedural_deviations,
+                ea.recurrence_indicators,
+                ea.systemic_trends
+            FROM emails e
+            LEFT JOIN email_analysis ea ON e.id = ea.email_id
+            ORDER BY e.created_at DESC
+        ''').fetchdf()
+        
+        if not detailed_data.empty:
+            # Convert timestamp columns
+            detailed_data['created_at'] = pd.to_datetime(detailed_data['created_at'])
+            detailed_data['analyzed_at'] = pd.to_datetime(detailed_data['analyzed_at'])
             
-            # Convert timestamp if exists
-            if 'metadata_timestamp' in df.columns:
-                df['timestamp'] = pd.to_datetime(df['metadata_timestamp'], unit='s')
+            # Create a container for key metrics
+            st.markdown("### 📊 Key Performance Indicators")
+            kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
             
-            # Display metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Emails", len(df))
-            with col2:
-                if 'metadata_sender' in df.columns:
-                    st.metric("Unique Senders", df['metadata_sender'].nunique())
-            with col3:
-                if 'metadata_incident_type' in df.columns:
-                    st.metric("Incident Types", df['metadata_incident_type'].nunique())
-            with col4:
-                if 'metadata_severity' in df.columns:
-                    st.metric("High Severity", df[df['metadata_severity'] == 'High'].shape[0])
+            with kpi_col1:
+                total_emails = len(detailed_data)
+                analyzed_emails = detailed_data['is_analyzed'].sum()
+                st.metric(
+                    "Email Analysis Coverage",
+                    f"{analyzed_emails}/{total_emails}",
+                    f"{((analyzed_emails/total_emails)*100):.1f}% analyzed"
+                )
             
-            # Create two columns for charts
-            col1, col2 = st.columns(2)
+            with kpi_col2:
+                high_severity = len(detailed_data[detailed_data['severity'] == 'High'])
+                st.metric(
+                    "High Severity Issues",
+                    high_severity,
+                    f"{((high_severity/total_emails)*100):.1f}% of total"
+                )
             
-            # Incident Type Distribution
-            with col1:
-                if 'metadata_incident_type' in df.columns:
-                    st.subheader("Incident Types")
+            with kpi_col3:
+                avg_response_time = (detailed_data['analyzed_at'] - detailed_data['created_at']).mean()
+                st.metric(
+                    "Avg. Analysis Time",
+                    f"{avg_response_time.total_seconds()/3600:.1f}h",
+                    "Time to analyze"
+                )
+            
+            with kpi_col4:
+                unique_incidents = detailed_data['incident_type'].nunique()
+                st.metric(
+                    "Unique Incident Types",
+                    unique_incidents,
+                    "Categories identified"
+                )
+            
+            # Create tabs for different analysis sections
+            analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs([
+                "📈 Trends & Patterns",
+                "🔍 Incident Analysis",
+                "🤖 AI Insights"
+            ])
+            
+            with analysis_tab1:
+                st.markdown("### 📈 Temporal Analysis")
+                
+                # Time-based analysis
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Daily email volume
+                    daily_volume = detailed_data.set_index('created_at').resample('D').size()
+                    fig = px.line(
+                        daily_volume,
+                        title="Daily Email Volume",
+                        labels={'value': 'Number of Emails', 'created_at': 'Date'}
+                    )
+                    fig.update_layout(showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    # Severity distribution over time
+                    severity_trend = pd.crosstab(
+                        detailed_data['created_at'].dt.date,
+                        detailed_data['severity']
+                    ).reset_index()
+                    
+                    # Ensure all severity levels exist in the DataFrame
+                    all_severities = ['High', 'Medium', 'Low']
+                    for severity in all_severities:
+                        if severity not in severity_trend.columns:
+                            severity_trend[severity] = 0
+                    
+                    # Melt the DataFrame with only the severity levels that exist in the data
+                    existing_severities = [col for col in all_severities if col in detailed_data['severity'].unique()]
+                    if not existing_severities:
+                        st.warning("No severity data available for visualization")
+                    else:
+                        severity_trend = pd.melt(
+                            severity_trend,
+                            id_vars=['created_at'],
+                            value_vars=existing_severities,
+                            var_name='Severity',
+                            value_name='Count'
+                        )
+                        fig = px.line(
+                            severity_trend,
+                            x='created_at',
+                            y='Count',
+                            color='Severity',
+                            title="Severity Trends Over Time"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                
+                # Incident type analysis
+                st.markdown("### 🔍 Incident Type Analysis")
+                col3, col4 = st.columns(2)
+                
+                with col3:
+                    # Incident type distribution
+                    incident_counts = detailed_data['incident_type'].value_counts()
                     fig = px.pie(
-                        df['metadata_incident_type'].value_counts(),
-                        names=df['metadata_incident_type'].value_counts().index,
-                        values=df['metadata_incident_type'].value_counts().values
+                        values=incident_counts.values,
+                        names=incident_counts.index,
+                        title="Incident Type Distribution"
                     )
                     st.plotly_chart(fig, use_container_width=True)
-            
-            # Severity Distribution
-            with col2:
-                if 'metadata_severity' in df.columns:
-                    st.subheader("Severity Levels")
+                
+                with col4:
+                    # Severity by incident type
+                    severity_by_type = pd.crosstab(
+                        detailed_data['incident_type'],
+                        detailed_data['severity']
+                    )
                     fig = px.bar(
-                        df['metadata_severity'].value_counts(),
-                        x=df['metadata_severity'].value_counts().index,
-                        y=df['metadata_severity'].value_counts().values,
-                        labels={'x': 'Severity', 'y': 'Count'}
+                        severity_by_type,
+                        title="Severity Distribution by Incident Type",
+                        barmode='group'
                     )
                     st.plotly_chart(fig, use_container_width=True)
             
-            # Timeline of Emails
-            if 'timestamp' in df.columns:
-                st.subheader("Emails Over Time")
-                timeline = df.set_index('timestamp').resample('D').size()
-                fig = px.line(timeline, labels={'value': 'Number of Emails', 'timestamp': 'Date'})
-                st.plotly_chart(fig, use_container_width=True)
+            with analysis_tab2:
+                st.markdown("### 🔍 Detailed Incident Analysis")
+                
+                # Create filters
+                col1, col2 = st.columns(2)
+                with col1:
+                    selected_incident = st.selectbox(
+                        "Select Incident Type",
+                        options=['All'] + list(detailed_data['incident_type'].unique())
+                    )
+                with col2:
+                    selected_severity = st.selectbox(
+                        "Select Severity",
+                        options=['All'] + list(detailed_data['severity'].unique())
+                    )
+                
+                # Filter data based on selection
+                filtered_data = detailed_data.copy()
+                if selected_incident != 'All':
+                    filtered_data = filtered_data[filtered_data['incident_type'] == selected_incident]
+                if selected_severity != 'All':
+                    filtered_data = filtered_data[filtered_data['severity'] == selected_severity]
+                
+                # Display filtered metrics
+                col3, col4 = st.columns(2)
+                
+                with col3:
+                    # Time to analyze for filtered data
+                    if not filtered_data.empty and 'analyzed_at' in filtered_data.columns:
+                        avg_time = (filtered_data['analyzed_at'] - filtered_data['created_at']).mean()
+                        st.metric(
+                            "Average Analysis Time",
+                            f"{avg_time.total_seconds()/3600:.1f}h",
+                            "For selected filters"
+                        )
+                
+                with col4:
+                    # Analysis coverage for filtered data
+                    if not filtered_data.empty:
+                        coverage = (filtered_data['is_analyzed'].sum() / len(filtered_data)) * 100
+                        st.metric(
+                            "Analysis Coverage",
+                            f"{coverage:.1f}%",
+                            "For selected filters"
+                        )
+                
+                # Show detailed table
+                st.markdown("### 📋 Detailed Incident Data")
+                if not filtered_data.empty:
+                    display_data = filtered_data[[
+                        'id', 'email_subject', 'incident_type', 'severity',
+                        'created_at', 'is_analyzed', 'analyzed_at'
+                    ]].copy()
+                    display_data['created_at'] = display_data['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    display_data['analyzed_at'] = display_data['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    display_data['is_analyzed'] = display_data['is_analyzed'].map({True: '✅', False: '❌'})
+                    
+                    st.dataframe(
+                        display_data,
+                        use_container_width=True,
+                        column_config={
+                            "id": st.column_config.NumberColumn("ID", width="small"),
+                            "email_subject": st.column_config.TextColumn("Subject", width="large"),
+                            "incident_type": st.column_config.TextColumn("Incident Type", width="medium"),
+                            "severity": st.column_config.TextColumn("Severity", width="small"),
+                            "created_at": st.column_config.TextColumn("Created At", width="medium"),
+                            "is_analyzed": st.column_config.TextColumn("Analyzed", width="small"),
+                            "analyzed_at": st.column_config.TextColumn("Analyzed At", width="medium")
+                        }
+                    )
+                else:
+                    st.info("No data available for selected filters")
+            
+            with analysis_tab3:
+                st.markdown("### 🤖 AI-Powered Insights")
+                
+                # Generate insights using LLM
+                if st.button("Generate AI Insights"):
+                    with st.spinner("Analyzing data with AI..."):
+                        # Prepare context for LLM
+                        context = f"""
+                        Total Emails: {len(detailed_data)}
+                        Time Range: {detailed_data['created_at'].min().strftime('%Y-%m-%d')} to {detailed_data['created_at'].max().strftime('%Y-%m-%d')}
+                        
+                        Incident Type Distribution:
+                        {detailed_data['incident_type'].value_counts().to_dict()}
+                        
+                        Severity Distribution:
+                        {detailed_data['severity'].value_counts().to_dict()}
+                        
+                        Recent Procedural Deviations:
+                        {detailed_data['procedural_deviations'].dropna().iloc[:5].tolist()}
+                        
+                        Recent Recurrence Indicators:
+                        {detailed_data['recurrence_indicators'].dropna().iloc[:5].tolist()}
+                        
+                        Recent Systemic Trends:
+                        {detailed_data['systemic_trends'].dropna().iloc[:5].tolist()}
+                        """
+                        
+                        # Query LLM for insights
+                        insights_prompt = """Based on the email analysis data provided, generate a comprehensive analysis report with the following sections:
+                        1. Key Trends and Patterns
+                        2. Critical Issues and Risks
+                        3. Recommendations for Improvement
+                        4. Predictive Insights
+                        
+                        Focus on actionable insights and specific patterns in the data. Be concise but thorough."""
+                        
+                        try:
+                            insights = query_llm_with_context(insights_prompt, context, 'deepseek')
+                            st.markdown(insights)
+                        except Exception as e:
+                            st.error(f"Error generating AI insights: {str(e)}")
+                
+                # Show correlation analysis
+                st.markdown("### 📊 Correlation Analysis")
+                
+                # Calculate correlations between different metrics
+                if not detailed_data.empty:
+                    # Create correlation matrix for numerical features
+                    correlation_data = pd.DataFrame({
+                        'severity_high': (detailed_data['severity'] == 'High').astype(int),
+                        'severity_medium': (detailed_data['severity'] == 'Medium').astype(int),
+                        'severity_low': (detailed_data['severity'] == 'Low').astype(int),
+                        'analysis_time': (detailed_data['analyzed_at'] - detailed_data['created_at']).dt.total_seconds() / 3600,
+                        'is_analyzed': detailed_data['is_analyzed'].astype(int)
+                    })
+                    
+                    # Calculate correlation matrix
+                    corr_matrix = correlation_data.corr()
+                    
+                    # Plot correlation heatmap
+                    fig = px.imshow(
+                        corr_matrix,
+                        title="Metric Correlations",
+                        color_continuous_scale='RdBu',
+                        aspect='auto'
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Show key correlations
+                    st.markdown("#### Key Correlations")
+                    correlations = []
+                    for i in range(len(corr_matrix.columns)):
+                        for j in range(i+1, len(corr_matrix.columns)):
+                            correlations.append({
+                                'Metric 1': corr_matrix.columns[i],
+                                'Metric 2': corr_matrix.columns[j],
+                                'Correlation': corr_matrix.iloc[i,j]
+                            })
+                    
+                    corr_df = pd.DataFrame(correlations)
+                    corr_df = corr_df[abs(corr_df['Correlation']) > 0.1].sort_values('Correlation', ascending=False)
+                    st.dataframe(corr_df, use_container_width=True)
             
         else:
             st.warning("No email data found in the database.")
             
     except Exception as e:
         st.error(f"Error loading analytics: {str(e)}")
+        logger.error(f"Error in analytics dashboard: {str(e)}")
 
 # Create three main columns for the original content
 with tab1:
@@ -2001,304 +2887,301 @@ with tab1:
                     st.error(f'Error processing import: {str(e)}')
             else:
                 st.warning('Please paste email JSON data to import.')
-    
-    # Clear Section
-    if st.button('🗑️ Clear All Data', type='primary', help='Warning: This will permanently delete all emails and analysis data'):
-        if st.checkbox('I understand this will permanently delete all data'):
-            if clear_emails_table():
-                st.success('✅ All data cleared successfully!')
-                st.rerun()
-            else:
-                st.error('❌ Failed to clear data')
-        else:
-            st.warning('Please confirm that you understand this action cannot be undone')
-    
-    add_reinitialize_button()  # Now this will work because the function is defined above
-    
-    # Show Analysis Results Button
-    if st.button('📊 Show Analysis Results'):
-        try:
-            # Query analysis results joined with emails
-            query = '''
-                SELECT 
-                    ar.email_id,
-                    e.email_subject,
-                    ar.procedural_deviations,
-                    ar.recurrence_indicators,
-                    ar.systemic_trends,
-                    ar.analysis_date
-                FROM analysis_results_new ar
-                JOIN emails e ON ar.email_id = e.id
-                ORDER BY ar.analysis_date DESC
-            '''
-            analysis_results = conn.execute(query).fetchdf()
-
-            if not analysis_results.empty:
-                # Format datetime column
-                analysis_results['analysis_date'] = analysis_results['analysis_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
-
-                # Rename columns for better display
-                analysis_results = analysis_results.rename(columns={
-                    'email_id': 'Email ID',
-                    'email_subject': 'Subject',
-                    'procedural_deviations': 'Procedural Deviations',
-                    'recurrence_indicators': 'Recurrence Indicators',
-                    'systemic_trends': 'Systemic Trends',
-                    'analysis_date': 'Analysis Date'
-                })
-
-                # Display the analysis results table
-                st.dataframe(analysis_results, use_container_width=True)
-            else:
-                st.info("No analysis results found in the database.")
-        except Exception as e:
-            logger.error(f"Error displaying analysis results: {str(e)}")
-            st.error("Error displaying analysis results. Please check the logs for details.")
-
-    # Add recategorize button to UI
-    add_recategorize_button()  # Add this line after other buttons
-    add_vector_store_management()  # Add this line
-
-# Right Column - RAG Query Interface
-with col3:
-    st.subheader('🤖 AI Query Interface')
-    
-    # Create a container for model selection with a border
-    with st.container():
-        st.markdown("### Model Selection")
-        model_choice = st.radio(
-            "Select Query Model",
-            options=['groq', 'deepseek'],
-            format_func=lambda x: 'Groq (Fast)' if x == 'groq' else 'DeepSeek (High Quality)',
-            help="Groq is faster but DeepSeek may provide more detailed analysis",
-            horizontal=True  # Make it horizontal for better space usage
-        )
         
-        # Show model details in an expander
-        with st.expander("Model Details", expanded=False):
-            if model_choice == 'groq':
-                st.markdown(f"**Current Model:** {GROQ_MODEL}")
-                st.markdown("**Features:**")
-                st.markdown("- Fast response times")
-                st.markdown("- Good for quick analysis")
-                st.markdown("- Suitable for most queries")
-            else:
-                st.markdown(f"**Current Model:** {DEEPSEEK_MODEL}")
-                st.markdown("**Features:**")
-                st.markdown("- High-quality responses")
-                st.markdown("- Better for complex analysis")
-                st.markdown("- More detailed insights")
-    
-    # Create a container for query input with a border
-    with st.container():
-        st.markdown("### Query Input")
-        query = st.text_area(
-            label="Ask a question about the emails",
-            height=100,
-            placeholder="Example: What are the most common maintenance issues reported?",
-            key="rag_query"
-        )
-        
-        # Get total analyzed emails for dynamic slider
-        total_analyzed = get_total_analyzed_emails()
-        max_emails = max(total_analyzed, 100)  # At least 100, or total analyzed if higher
-        
-        # Context size control with dynamic limits
-        st.markdown("### Context Settings")
-        col3_1, col3_2 = st.columns(2)
-        with col3_1:
-            context_size = st.slider(
-                "Number of recent emails",
-                min_value=5,
-                max_value=max_emails,
-                value=min(20, max_emails),
-                step=5,
-                help="How many recent emails to include in the context"
-            )
-        with col3_2:
-            days_back = st.slider(
-                "Days to look back",
-                min_value=1,
-                max_value=90,
-                value=30,
-                step=1,
-                help="How far back to look for relevant emails"
-            )
-    
-    # Query button in its own container
-    with st.container():
-        if st.button('🔍 Analyze Emails', use_container_width=True):
-            if query:
-                with st.spinner(f'Analyzing emails using {model_choice}...'):
-                    # Get context from analyzed emails
-                    context, num_emails = get_email_context(context_size, query, days_back=days_back)
-                    
-                    # Show context information in an expander
-                    with st.expander("Context Information", expanded=False):
-                        st.info(f"Using {num_emails} emails for context (requested: {context_size})")
-                        st.markdown(f"Total analyzed emails available: {total_analyzed}")
-                    
-                    # Query LLM with context and selected model
-                    response = query_llm_with_context(query, context, model_choice)
-                    
-                    # Store in session state
-                    st.session_state['last_query'] = {
-                        'query': query,
-                        'response': response,
-                        'model': model_choice,
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'context_size': len(context.split('\n')),
-                        'requested_size': context_size,
-                        'total_available': total_analyzed,
-                        'num_emails_used': num_emails,
-                        'days_back': days_back
-                    }
-            else:
-                st.warning('Please enter a question to analyze.')
-    
-    # Display last query result in a clean container
-    if 'last_query' in st.session_state:
-        with st.container():
-            st.markdown("### Analysis Results")
-            
-            # Query details in an expander
-            with st.expander("Query Details", expanded=False):
-                st.markdown(f"**Timestamp:** {st.session_state['last_query']['timestamp']}")
-                st.markdown(f"**Model Used:** {st.session_state['last_query']['model'].upper()}")
-                st.markdown(f"**Context:** {st.session_state['last_query']['num_emails_used']} emails, {st.session_state['last_query']['days_back']} days back")
-            
-            # Display the query and response in a clean format
-            st.markdown("#### Question")
-            st.markdown(f"_{st.session_state['last_query']['query']}_")
-            
-            st.markdown("#### Response")
-            st.markdown(st.session_state['last_query']['response'])
-
-# Footer with metrics - make it more compact
-st.markdown("---")
-st.markdown("### 📊 Dashboard Status")
-status_col1, status_col2, status_col3, status_col4 = st.columns(4)
-
-with status_col1:
-    try:
-        conn = get_db_connection()
-        if conn:
-            try:
-                count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-                analyzed = conn.execute("SELECT COUNT(*) FROM emails WHERE is_analyzed = TRUE").fetchone()[0]
-                st.metric("Total Emails", count, f"{analyzed} analyzed")
-            except Exception as e:
-                if "Table with name emails does not exist" in str(e):
-                    st.metric("Total Emails", "0", "0 analyzed")
+        # Clear Section
+        if st.button('🗑️ Clear All Data', type='primary', help='Warning: This will permanently delete all emails and analysis data'):
+                if clear_emails_table():
+                    st.success('✅ All data cleared successfully!')
+                    st.rerun()
                 else:
-                    logger.error(f"Error getting email count: {str(e)}")
-                    st.metric("Total Emails", "Error")
-        else:
-            st.metric("Total Emails", "Error")
-    except Exception as e:
-        logger.error(f"Error getting email count: {str(e)}")
-        st.metric("Total Emails", "Error")
+                    st.error('❌ Failed to clear data')
+        
+        add_reinitialize_button()  # Now this will work because the function is defined above
+        
+        # Show Analysis Results Button
+        if st.button('📊 Show Analysis Results'):
+            try:
+                # Query analysis results joined with emails
+                query = '''
+                    SELECT 
+                        ar.email_id,
+                        e.email_subject,
+                        ar.procedural_deviations,
+                        ar.recurrence_indicators,
+                        ar.systemic_trends,
+                        ar.created_at as analysis_date
+                    FROM email_analysis ar
+                    JOIN emails e ON ar.email_id = e.id
+                    ORDER BY ar.created_at DESC
+                '''
+                analysis_results = conn.execute(query).fetchdf()
 
-with status_col2:
-    st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
+                if not analysis_results.empty:
+                    # Format datetime column
+                    analysis_results['analysis_date'] = analysis_results['analysis_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
-with status_col3:
-    if st.button('📋 View Emails', use_container_width=True):
+                    # Rename columns for better display
+                    analysis_results = analysis_results.rename(columns={
+                        'email_id': 'Email ID',
+                        'email_subject': 'Subject',
+                        'procedural_deviations': 'Procedural Deviations',
+                        'recurrence_indicators': 'Recurrence Indicators',
+                        'systemic_trends': 'Systemic Trends',
+                        'analysis_date': 'Analysis Date'
+                    })
+
+                    # Display the analysis results table
+                    st.dataframe(analysis_results, use_container_width=True)
+                else:
+                    st.info("No analysis results found in the database.")
+            except Exception as e:
+                logger.error(f"Error displaying analysis results: {str(e)}")
+                st.error("Error displaying analysis results. Please check the logs for details.")
+
+        # Add recategorize button to UI
+        add_recategorize_button()  # Add this line after other buttons
+        add_vector_store_management()  # Add this line
+
+    # Right Column - RAG Query Interface
+    with col3:
+        st.subheader('🤖 AI Query Interface')
+        
+        # Create a container for model selection with a border
+        with st.container():
+            st.markdown("### Model Selection")
+            model_choice = st.radio(
+                "Select Query Model",
+                options=['groq', 'deepseek'],
+                format_func=lambda x: 'Groq (Fast)' if x == 'groq' else 'DeepSeek (High Quality)',
+                help="Groq is faster but DeepSeek may provide more detailed analysis",
+                horizontal=True  # Make it horizontal for better space usage
+            )
+            
+            # Show model details in an expander
+            with st.expander("Model Details", expanded=False):
+                if model_choice == 'groq':
+                    st.markdown(f"**Current Model:** {GROQ_MODEL}")
+                    st.markdown("**Features:**")
+                    st.markdown("- Fast response times")
+                    st.markdown("- Good for quick analysis")
+                    st.markdown("- Suitable for most queries")
+                else:
+                    st.markdown(f"**Current Model:** {DEEPSEEK_MODEL}")
+                    st.markdown("**Features:**")
+                    st.markdown("- High-quality responses")
+                    st.markdown("- Better for complex analysis")
+                    st.markdown("- More detailed insights")
+        
+        # Create a container for query input with a border
+        with st.container():
+            st.markdown("### Query Input")
+            query = st.text_area(
+                label="Ask a question about the emails",
+                height=100,
+                placeholder="Example: What are the most common maintenance issues reported?",
+                key="rag_query"
+            )
+            
+            # Get total analyzed emails for dynamic slider
+            total_analyzed = get_total_analyzed_emails()
+            max_emails = max(total_analyzed, 100)  # At least 100, or total analyzed if higher
+            
+            # Context size control with dynamic limits
+            st.markdown("### Context Settings")
+            col3_1, col3_2 = st.columns(2)
+            with col3_1:
+                context_size = st.slider(
+                    "Number of recent emails",
+                    min_value=5,
+                    max_value=max_emails,
+                    value=min(20, max_emails),
+                    step=5,
+                    help="How many recent emails to include in the context"
+                )
+            with col3_2:
+                days_back = st.slider(
+                    "Days to look back",
+                    min_value=1,
+                    max_value=90,
+                    value=30,
+                    step=1,
+                    help="How far back to look for relevant emails"
+                )
+        
+        # Query button in its own container
+        with st.container():
+            if st.button('🔍 Analyze Emails', use_container_width=True):
+                if query:
+                    with st.spinner(f'Analyzing emails using {model_choice}...'):
+                        # Get context from analyzed emails
+                        context, num_emails = get_email_context(context_size, query, days_back=days_back)
+                        
+                        # Show context information in an expander
+                        with st.expander("Context Information", expanded=False):
+                            st.info(f"Using {num_emails} emails for context (requested: {context_size})")
+                            st.markdown(f"Total analyzed emails available: {total_analyzed}")
+                        
+                        # Query LLM with context and selected model
+                        response = query_llm_with_context(query, context, model_choice)
+                        
+                        # Store in session state
+                        st.session_state['last_query'] = {
+                            'query': query,
+                            'response': response,
+                            'model': model_choice,
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'context_size': len(context.split('\n')),
+                            'requested_size': context_size,
+                            'total_available': total_analyzed,
+                            'num_emails_used': num_emails,
+                            'days_back': days_back
+                        }
+                else:
+                    st.warning('Please enter a question to analyze.')
+        
+        # Display last query result in a clean container
+        if 'last_query' in st.session_state:
+            with st.container():
+                st.markdown("### Analysis Results")
+                
+                # Query details in an expander
+                with st.expander("Query Details", expanded=False):
+                    st.markdown(f"**Timestamp:** {st.session_state['last_query']['timestamp']}")
+                    st.markdown(f"**Model Used:** {st.session_state['last_query']['model'].upper()}")
+                    st.markdown(f"**Context:** {st.session_state['last_query']['num_emails_used']} emails, {st.session_state['last_query']['days_back']} days back")
+                
+                # Display the query and response in a clean format
+                st.markdown("#### Question")
+                st.markdown(f"_{st.session_state['last_query']['query']}_")
+                
+                st.markdown("#### Response")
+                st.markdown(st.session_state['last_query']['response'])
+
+    # Footer with metrics - make it more compact
+    st.markdown("---")
+    st.markdown("### 📊 Dashboard Status")
+    status_col1, status_col2, status_col3, status_col4 = st.columns(4)
+
+    with status_col1:
         try:
             conn = get_db_connection()
-            query = '''
-                SELECT 
-                    e.id,
-                    e.email_subject,
-                    e.email_to,
-                    e.email_from,
-                    e.incident_type,
-                    e.severity,
-                    e.email_text_body,
-                    e.is_analyzed,
-                    e.analyzed_at,
-                    e.created_at
-                FROM emails e
-                ORDER BY e.id DESC
-            '''
-            emails = conn.execute(query).fetchdf()
-            
-            if not emails.empty:
-                # Format the dataframe for display
-                emails['analyzed_at'] = emails['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                emails['created_at'] = emails['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                emails['is_analyzed'] = emails['is_analyzed'].map({True: '✅', False: '❌'})
-                emails['email_text_body'] = emails['email_text_body'].apply(
-                    lambda x: x[:100] + '...' if len(str(x)) > 100 else x
-                )
-                
-                # Rename and reorder columns
-                emails = emails.rename(columns={
-                    'id': 'ID',
-                    'email_subject': 'Subject',
-                    'email_to': 'To',
-                    'email_from': 'From',
-                    'incident_type': 'Incident Type',
-                    'severity': 'Severity',
-                    'email_text_body': 'Body Preview',
-                    'is_analyzed': 'Analyzed',
-                    'analyzed_at': 'Analyzed At',
-                    'created_at': 'Created At'
-                })
-                
-                # Display with better formatting
-                st.dataframe(
-                    emails[['ID', 'Subject', 'To', 'From', 'Incident Type', 'Severity', 'Body Preview', 'Analyzed', 'Analyzed At', 'Created At']],
-                    use_container_width=True,
-                    column_config={
-                        "Body Preview": st.column_config.TextColumn(
-                            "Body Preview",
-                            width="large",
-                            help="First 100 characters of the email body"
-                        ),
-                        "Subject": st.column_config.TextColumn(
-                            "Subject",
-                            width="medium"
-                        ),
-                        "To": st.column_config.TextColumn(
-                            "To",
-                            width="medium"
-                        ),
-                        "From": st.column_config.TextColumn(
-                            "From",
-                            width="medium"
-                        ),
-                        "Incident Type": st.column_config.TextColumn(
-                            "Incident Type",
-                            width="small"
-                        ),
-                        "Severity": st.column_config.TextColumn(
-                            "Severity",
-                            width="small"
-                        ),
-                        "ID": st.column_config.NumberColumn(
-                            "ID",
-                            width="small"
-                        ),
-                        "Analyzed": st.column_config.TextColumn(
-                            "Analyzed",
-                            width="small"
-                        ),
-                        "Analyzed At": st.column_config.TextColumn(
-                            "Analyzed At",
-                            width="medium"
-                        ),
-                        "Created At": st.column_config.TextColumn(
-                            "Created At",
-                            width="medium"
-                        )
-                    }
-                )
+            if conn:
+                try:
+                    count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
+                    analyzed = conn.execute("SELECT COUNT(*) FROM emails WHERE is_analyzed = TRUE").fetchone()[0]
+                    st.metric("Total Emails", count, f"{analyzed} analyzed")
+                except Exception as e:
+                    if "Table with name emails does not exist" in str(e):
+                        st.metric("Total Emails", "0", "0 analyzed")
+                    else:
+                        logger.error(f"Error getting email count: {str(e)}")
+                        st.metric("Total Emails", "Error")
             else:
-                st.info("No emails found in the database.")
+                st.metric("Total Emails", "Error")
         except Exception as e:
-            logger.error(f"Error displaying table: {str(e)}")
-            st.error("Error displaying table. Please check the logs for details.")
+            logger.error(f"Error getting email count: {str(e)}")
+            st.metric("Total Emails", "Error")
+
+    with status_col2:
+        st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
+
+    with status_col3:
+        if st.button('📋 View Emails', use_container_width=True):
+            try:
+                conn = get_db_connection()
+                query = '''
+                    SELECT 
+                        e.id,
+                        e.email_subject,
+                        e.email_to,
+                        e.email_from,
+                        e.incident_type,
+                        e.severity,
+                        e.email_text_body,
+                        e.is_analyzed,
+                        e.analyzed_at,
+                        e.created_at
+                    FROM emails e
+                    ORDER BY e.id DESC
+                '''
+                emails = conn.execute(query).fetchdf()
+                
+                if not emails.empty:
+                    # Format the dataframe for display
+                    emails['analyzed_at'] = emails['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    emails['created_at'] = emails['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                    emails['is_analyzed'] = emails['is_analyzed'].map({True: '✅', False: '❌'})
+                    emails['email_text_body'] = emails['email_text_body'].apply(
+                        lambda x: x[:100] + '...' if len(str(x)) > 100 else x
+                    )
+                    
+                    # Rename and reorder columns
+                    emails = emails.rename(columns={
+                        'id': 'ID',
+                        'email_subject': 'Subject',
+                        'email_to': 'To',
+                        'email_from': 'From',
+                        'incident_type': 'Incident Type',
+                        'severity': 'Severity',
+                        'email_text_body': 'Body Preview',
+                        'is_analyzed': 'Analyzed',
+                        'analyzed_at': 'Analyzed At',
+                        'created_at': 'Created At'
+                    })
+                    
+                    # Display with better formatting
+                    st.dataframe(
+                        emails[['ID', 'Subject', 'To', 'From', 'Incident Type', 'Severity', 'Body Preview', 'Analyzed', 'Analyzed At', 'Created At']],
+                        use_container_width=True,
+                        column_config={
+                            "Body Preview": st.column_config.TextColumn(
+                                "Body Preview",
+                                width="large",
+                                help="First 100 characters of the email body"
+                            ),
+                            "Subject": st.column_config.TextColumn(
+                                "Subject",
+                                width="medium"
+                            ),
+                            "To": st.column_config.TextColumn(
+                                "To",
+                                width="medium"
+                            ),
+                            "From": st.column_config.TextColumn(
+                                "From",
+                                width="medium"
+                            ),
+                            "Incident Type": st.column_config.TextColumn(
+                                "Incident Type",
+                                width="small"
+                            ),
+                            "Severity": st.column_config.TextColumn(
+                                "Severity",
+                                width="small"
+                            ),
+                            "ID": st.column_config.NumberColumn(
+                                "ID",
+                                width="small"
+                            ),
+                            "Analyzed": st.column_config.TextColumn(
+                                "Analyzed",
+                                width="small"
+                            ),
+                            "Analyzed At": st.column_config.TextColumn(
+                                "Analyzed At",
+                                width="medium"
+                            ),
+                            "Created At": st.column_config.TextColumn(
+                                "Created At",
+                                width="medium"
+                            )
+                        }
+                    )
+                else:
+                    st.info("No emails found in the database.")
+            except Exception as e:
+                logger.error(f"Error displaying table: {str(e)}")
+                st.error("Error displaying table. Please check the logs for details.")
 
 with status_col4:
     if st.button('🤖 Model Info', use_container_width=True):

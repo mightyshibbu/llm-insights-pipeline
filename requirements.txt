@@ -9,3 +9,6 @@ html2text>=2020.1.16
 chromadb>=0.4.18
 numpy>=1.24.0
 openai>=1.0.0  # For OpenAI embeddings (optional)
+plotly
+logger
+lxml
