@@ -21,10 +21,13 @@ import re
 from bs4 import BeautifulSoup
 import html2text
 from typing import Dict, Any
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+from pinecone_store import init_pinecone, store_email as store_email_pinecone, query_similar_emails, get_email_context as get_pinecone_context, clear_pinecone_index, get_pinecone_stats, fetch_all_pinecone_emails
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from collections import Counter
 import numpy as np
+from sklearn.manifold import TSNE
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +39,16 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Initialize Pinecone
+if 'pinecone_index' not in st.session_state:
+    try:
+        st.session_state.pinecone_index = init_pinecone()
+        logger.info("Pinecone initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing Pinecone: {str(e)}")
+        st.error("Failed to initialize vector database. Please check the logs for details.")
+        st.stop()
 
 # Load environment variables only once
 if 'env_loaded' not in st.session_state:
@@ -91,54 +104,6 @@ INCIDENT_CATEGORIES = [
 ]
 
 SEVERITY_LEVELS = ["Low", "Medium", "High"]
-
-# ChromaDB configuration
-CHROMA_PERSIST_DIR = "chroma_db"
-CHROMA_COLLECTION_NAME = "email_summaries"
-
-# Initialize ChromaDB client
-if 'chroma_client' not in st.session_state:
-    try:
-        # Create persistent client
-        st.session_state.chroma_client = chromadb.PersistentClient(
-            path=CHROMA_PERSIST_DIR,
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=True
-            )
-        )
-        
-        # Use ChromaDB's default embedding function
-        embedding_function = embedding_functions.DefaultEmbeddingFunction()
-        
-        # Try to get existing collection or create new one
-        try:
-            st.session_state.email_collection = st.session_state.chroma_client.get_collection(
-                name=CHROMA_COLLECTION_NAME,
-                embedding_function=embedding_function
-            )
-            logger.info(f"Retrieved existing ChromaDB collection: {CHROMA_COLLECTION_NAME}")
-        except Exception as e:
-            logger.info(f"Creating new ChromaDB collection: {CHROMA_COLLECTION_NAME}")
-            st.session_state.email_collection = st.session_state.chroma_client.create_collection(
-                name=CHROMA_COLLECTION_NAME,
-                embedding_function=embedding_function,
-                metadata={"description": "Email summaries and analysis results"}
-            )
-        
-        logger.info("ChromaDB client and collection initialized successfully with default embedding function")
-    except Exception as e:
-        logger.error(f"Error initializing ChromaDB: {str(e)}")
-        st.error("Failed to initialize vector database. Please check the logs for details.")
-        st.stop()
-
-# Get collection from session state
-try:
-    email_collection = st.session_state.email_collection
-except Exception as e:
-    logger.error(f"Error accessing ChromaDB collection: {str(e)}")
-    st.error("Failed to access vector database. Please check the logs for details.")
-    st.stop()
 
 def get_db_connection():
     """Get or create database connection"""
@@ -659,7 +624,7 @@ def analyze_email_content(subject: str, body: str) -> Dict[str, Any]:
         }
 
 def store_email(email_data):
-    """Store email in both DuckDB and ChromaDB with permanent embeddings"""
+    """Store email in database and Pinecone with enhanced analysis"""
     try:
         email = email_data['Email']
         # Extract HTML and convert to clean text
@@ -675,7 +640,12 @@ def store_email(email_data):
         # Analyze email content using LLM
         analysis = analyze_email_content(email['Subject'], text_body)
         
-        # Store the email in DuckDB
+        # Add analysis data to email_data
+        email_data['incident_type'] = analysis['incident_type']
+        email_data['severity'] = analysis['severity']
+        email_data['reasoning'] = analysis['reasoning']
+        
+        # Store in DuckDB
         conn.execute('''
             INSERT INTO emails (
                 id, email_subject, email_text_body, email_to, email_from,
@@ -691,31 +661,12 @@ def store_email(email_data):
             analysis['severity']
         ))
         
-        # Generate summary for the email
-        summary = summarize_emails_bulk([(next_id, text_body, email['Subject'])])[next_id]
+        # Store in Pinecone
+        if not store_email_pinecone(email_data):
+            logger.error(f"Failed to store email {next_id} in Pinecone")
+            return False
         
-        # Store in ChromaDB permanently
-        try:
-            current_time = datetime.now()
-            email_collection.add(
-                documents=[summary],
-                metadatas=[{
-                    'email_id': next_id,
-                    'subject': email['Subject'],
-                    'incident_type': analysis['incident_type'],
-                    'severity': analysis['severity'],
-                    'created_at': current_time.isoformat(),
-                    'created_at_timestamp': int(current_time.timestamp()),
-                    'is_analyzed': False
-                }],
-                ids=[str(next_id)]
-            )
-            logger.info(f"Stored email {next_id} in ChromaDB with embedding")
-        except Exception as e:
-            logger.error(f"Error storing in ChromaDB: {str(e)}")
-            # Continue even if ChromaDB storage fails - we still have the email in DuckDB
-        
-        logger.info(f"Stored email {next_id} in DuckDB")
+        logger.info(f"Stored email {next_id}: {email['Subject'][:50]}...")
         logger.info(f"Analysis: Type={analysis['incident_type']}, Severity={analysis['severity']}")
         return True
     except Exception as e:
@@ -1045,7 +996,7 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
     try:
         # Calculate date threshold
         date_threshold = datetime.now() - timedelta(days=days_back)
-        # Convert to timestamp for ChromaDB comparison
+        # Convert to timestamp for comparison
         date_threshold_timestamp = int(date_threshold.timestamp())
         logger.info(f"Retrieving context with parameters: limit={limit}, days_back={days_back}, date_threshold={date_threshold.isoformat()}")
         
@@ -1068,32 +1019,33 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                 
                 logger.info(f"Found {len(recent_emails)} recent emails for potential fallback")
                 
-                # Query ChromaDB directly for similar summaries
-                logger.info("Querying ChromaDB for similar summaries...")
-                results = email_collection.query(
-                    query_texts=[query_text],
-                    n_results=limit * 2,  # Get more results than needed for filtering
-                    where={"created_at_timestamp": {"$gte": date_threshold_timestamp}},
-                    include=["documents", "metadatas", "distances"]
+                # Query Pinecone for similar documents
+                logger.info("Querying Pinecone for similar documents...")
+                results = st.session_state.pinecone_index.query(
+                    vector=query_text,
+                    top_k=limit * 2,  # Get more results than needed for filtering
+                    include_metadata=True,
+                    filter={
+                        "created_at_timestamp": {"$gte": date_threshold_timestamp}
+                    }
                 )
                 
-                # Log ChromaDB query results
-                if results['documents'] and results['documents'][0]:
-                    logger.info(f"ChromaDB returned {len(results['documents'][0])} results")
-                    for i, (doc, metadata, distance) in enumerate(zip(results['documents'][0], results['metadatas'][0], results['distances'][0])):
+                # Log Pinecone query results
+                if results.matches:
+                    logger.info(f"Pinecone returned {len(results.matches)} results")
+                    for i, match in enumerate(results.matches):
                         logger.info(f"Result {i+1}:")
-                        logger.info(f"  Email ID: {metadata['email_id']}")
-                        logger.info(f"  Subject: {metadata['subject']}")
-                        logger.info(f"  Incident Type: {metadata['incident_type']}")
-                        logger.info(f"  Severity: {metadata['severity']}")
-                        logger.info(f"  Similarity Score: {1 - distance:.2f}")
-                        logger.info(f"  Summary: {doc[:200]}...")
+                        logger.info(f"  Email ID: {match.metadata.get('email_id', 'unknown')}")
+                        logger.info(f"  Subject: {match.metadata.get('subject', 'No Subject')}")
+                        logger.info(f"  Incident Type: {match.metadata.get('incident_type', 'Unknown')}")
+                        logger.info(f"  Severity: {match.metadata.get('severity', 'Unknown')}")
+                        logger.info(f"  Summary: {match.metadata.get('summary', 'No summary')[:200]}...")
                 else:
                     logger.warning("No results from vector search, falling back to text search")
                     return get_fallback_context(recent_emails, query_text, limit, days_back)
                 
                 # Get full email details from DuckDB
-                email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+                email_ids = [int(match.metadata.get('email_id', 0)) for match in results.matches]
                 logger.info(f"Retrieving full details for {len(email_ids)} emails from DuckDB")
                 
                 # Get full email details
@@ -1110,8 +1062,8 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                 total_chars = 0
                 used_emails = set()
                 
-                for doc, metadata, distance in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
-                    email_id = int(metadata['email_id'])
+                for match in results.matches:
+                    email_id = int(match.metadata.get('email_id', 0))
                     if email_id in used_emails or total_chars >= MAX_CONTEXT_SIZE:
                         continue
                     
@@ -1119,8 +1071,8 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                     email_detail = next((e for e in emails if e[0] == email_id), None)
                     if email_detail:
                         id, subject, body, inc_type, sev = email_detail
-                        email_content = f"""Email {id} (Similarity: {1 - distance:.2f}):
-{doc}
+                        email_content = f"""Email {id} (Similarity: {match.score:.2f}):
+{match.metadata.get('summary', 'No summary available')}
 Body Preview: {body[:200]}..."""
                         
                         email_size = len(email_content)
@@ -1163,18 +1115,17 @@ Body Preview: {body[:200]}..."""
             
             logger.info(f"Retrieved {len(emails)} recent emails from DuckDB")
             
-            # Get summaries from ChromaDB for these emails
+            # Get summaries from Pinecone for these emails
             try:
-                logger.info("Retrieving summaries from ChromaDB")
-                summaries = email_collection.get(
-                    ids=[str(id) for id, _, _, _, _ in emails],
-                    include=["documents", "metadatas"]
+                logger.info("Retrieving summaries from Pinecone")
+                results = st.session_state.pinecone_index.fetch(
+                    ids=[str(id) for id, _, _, _, _ in emails]
                 )
-                summary_map = {int(metadata['email_id']): doc 
-                             for doc, metadata in zip(summaries['documents'], summaries['metadatas'])}
-                logger.info(f"Retrieved {len(summary_map)} summaries from ChromaDB")
+                summary_map = {int(match.metadata['email_id']): match.metadata['summary']
+                             for match in results.vectors.values()}
+                logger.info(f"Retrieved {len(summary_map)} summaries from Pinecone")
             except Exception as e:
-                logger.error(f"Error getting summaries from ChromaDB: {str(e)}")
+                logger.error(f"Error getting summaries from Pinecone: {str(e)}")
                 summary_map = {}
             
             # Generate context with summaries
@@ -1339,21 +1290,21 @@ def store_analysis_results(email_id, procedural_deviations, recurrence_indicator
         return False
 
 def get_similar_emails(query_text, limit=5):
-    """Get similar emails using ChromaDB vector similarity search"""
+    """Get similar emails using Pinecone vector similarity search"""
     try:
-        # Query ChromaDB for similar documents
-        results = email_collection.query(
-            query_texts=[query_text],
-            n_results=limit,
-            include=["documents", "metadatas", "distances"]
+        # Query Pinecone for similar documents
+        results = st.session_state.pinecone_index.query(
+            vector=query_text,
+            top_k=limit,
+            include_metadata=True
         )
         
-        if not results['documents'] or not results['documents'][0]:
+        if not results.matches:
             return []
         
         # Get additional details from DuckDB
         conn = get_db_connection()
-        email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+        email_ids = [int(match.metadata['email_id']) for match in results.matches]
         
         # Get full email details
         email_details = conn.execute('''
@@ -1364,13 +1315,13 @@ def get_similar_emails(query_text, limit=5):
         
         # Create results list with similarity scores
         results_list = []
-        for doc, metadata, distance in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
-            email_id = int(metadata['email_id'])
+        for match in results.matches:
+            email_id = int(match.metadata['email_id'])
             # Find matching email details
             email_detail = next((e for e in email_details if e[0] == email_id), None)
             if email_detail:
                 _, subject, text = email_detail
-                results_list.append((email_id, subject, text, 1 - distance))  # Convert distance to similarity
+                results_list.append((email_id, subject, text, match.score))  # Use Pinecone's score directly
         
         return results_list
     except Exception as e:
@@ -1557,12 +1508,12 @@ def add_recategorize_button():
                 st.info('No emails needed recategorization')
 
 def get_total_analyzed_emails():
-    """Get the total number of analyzed emails from ChromaDB"""
+    """Get the total number of analyzed emails from the vector store"""
     try:
-        results = email_collection.get(
-            where={"analyzed": True}
-        )
-        return len(results['ids'])
+        stats = get_pinecone_stats()
+        if stats:
+            return stats['total_vectors']
+        return 0
     except Exception as e:
         logger.error(f"Error getting total analyzed emails: {str(e)}")
         return 0
@@ -1605,32 +1556,33 @@ def determine_relevant_categories(query_text):
     return [category for category, score in category_scores.items() if score > 0]
 
 def clear_emails_table():
-    """Clear both DuckDB and ChromaDB databases"""
+    """Clear the emails table and all dependent tables - only called when user clicks 'Clear All'"""
     try:
-        # Clear DuckDB
+        # Close current connection
         if 'conn' in st.session_state and st.session_state.conn is not None:
             st.session_state.conn.close()
             st.session_state.conn = None
         
+        # Delete the database file to fully clear data
         if os.path.exists(DB_PATH):
             os.remove(DB_PATH)
             logger.info(f"Deleted database file {DB_PATH}")
         
-        # Clear ChromaDB
-        if not clear_vector_store():
-            logger.error("Failed to clear vector store")
+        # Clear Pinecone index
+        if not clear_pinecone_index():
+            logger.error("Failed to clear Pinecone index")
             return False
         
-        # Reinitialize database
+        # Reconnect and reinitialize database
         st.session_state.conn = duckdb.connect(DB_PATH)
         if not init_database():
             logger.error("Failed to reinitialize database after clearing")
             return False
         
-        logger.info("Database and vector store cleared by user request")
+        logger.info("Database and Pinecone cleared by user request")
         return True
     except Exception as e:
-        logger.error(f"Error clearing databases: {str(e)}")
+        logger.error(f"Error clearing database: {str(e)}")
         return False
 
 def update_email_embeddings(email_ids=None):
@@ -1687,9 +1639,9 @@ def update_email_embeddings(email_ids=None):
                 if not summaries:
                     raise Exception("Failed to generate summaries after all retries")
                 
-                # Prepare metadata for ChromaDB
+                # Prepare vectors and metadata for Pinecone
+                vectors = []
                 metadatas = []
-                documents = []
                 ids = []
                 
                 for id, subject, body, inc_type, sev in batch:
@@ -1700,7 +1652,7 @@ def update_email_embeddings(email_ids=None):
                         logger.warning(f"Using basic summary for email {id}")
                     
                     current_time = datetime.now()
-                    metadatas.append({
+                    metadata = {
                         'email_id': id,
                         'subject': subject,
                         'incident_type': inc_type,
@@ -1708,29 +1660,41 @@ def update_email_embeddings(email_ids=None):
                         'created_at': current_time.isoformat(),
                         'created_at_timestamp': int(current_time.timestamp()),
                         'is_analyzed': True,
-                        'summary_type': 'llm' if summaries.get(id) else 'basic'
-                    })
-                    documents.append(summary)
-                    ids.append(str(id))
-                
-                # Update ChromaDB
-                try:
-                    # Delete existing entries
-                    email_collection.delete(
-                        ids=ids
+                        'summary_type': 'llm' if summaries.get(id) else 'basic',
+                        'summary': summary
+                    }
+                    
+                    # Generate embedding for the summary
+                    vector = st.session_state.pinecone_index.upsert(
+                        vectors=[{
+                            'id': str(id),
+                            'values': summary,  # Pinecone will handle the embedding
+                            'metadata': metadata
+                        }]
                     )
                     
+                    vectors.append(vector)
+                    metadatas.append(metadata)
+                    ids.append(str(id))
+                
+                # Update Pinecone
+                try:
+                    # Delete existing entries
+                    st.session_state.pinecone_index.delete(ids=ids)
+                    
                     # Add updated entries
-                    email_collection.add(
-                        documents=documents,
-                        metadatas=metadatas,
-                        ids=ids
+                    st.session_state.pinecone_index.upsert(
+                        vectors=[{
+                            'id': id,
+                            'values': summary,  # Pinecone will handle the embedding
+                            'metadata': metadata
+                        } for id, summary, metadata in zip(ids, [m['summary'] for m in metadatas], metadatas)]
                     )
                     success_count += len(batch)
                     logger.info(f"Updated embeddings for batch of {len(batch)} emails")
                 except Exception as e:
                     error_count += len(batch)
-                    logger.error(f"Error updating ChromaDB for batch: {str(e)}")
+                    logger.error(f"Error updating Pinecone for batch: {str(e)}")
                 
                 # Small delay between batches to avoid rate limits
                 time.sleep(0.5)
@@ -1752,32 +1716,24 @@ def update_email_embeddings(email_ids=None):
         return 0, 0
 
 def clear_vector_store():
-    """Clear the ChromaDB collection"""
+    """Clear the Pinecone index"""
     try:
-        # Delete the collection
-        st.session_state.chroma_client.delete_collection(CHROMA_COLLECTION_NAME)
-        
-        # Recreate the collection
-        st.session_state.email_collection = st.session_state.chroma_client.create_collection(
-            name=CHROMA_COLLECTION_NAME,
-            embedding_function=embedding_functions.DefaultEmbeddingFunction(),
-            metadata={"description": "Email summaries and analysis results"}
-        )
-        
-        logger.info("ChromaDB collection cleared and recreated")
+        # Delete all vectors from the index
+        st.session_state.pinecone_index.delete(delete_all=True)
+        logger.info("Pinecone index cleared successfully")
         return True
     except Exception as e:
         logger.error(f"Error clearing vector store: {str(e)}")
         return False
 
 def get_vector_store_stats():
-    """Get statistics about the ChromaDB collection"""
+    """Get statistics about the Pinecone index"""
     try:
-        count = email_collection.count()
+        stats = st.session_state.pinecone_index.describe_index_stats()
         return {
-            'total_documents': count,
-            'collection_name': CHROMA_COLLECTION_NAME,
-            'embedding_function': 'DefaultEmbeddingFunction'
+            'total_documents': stats.total_vector_count,
+            'index_name': 'email-analysis',  # Use known index name
+            'dimension': stats.dimension
         }
     except Exception as e:
         logger.error(f"Error getting vector store stats: {str(e)}")
@@ -1816,418 +1772,462 @@ def add_vector_store_management():
         st.markdown("#### Vector Store Statistics")
         st.markdown(f"""
         - Total Documents: {stats['total_documents']}
-        - Collection Name: {stats['collection_name']}
-        - Embedding Function: {stats['embedding_function']}
+        - Index Name: {stats['index_name']}
+        - Vector Dimension: {stats['dimension']}
         """)
 
-# Streamlit UI
-st.set_page_config(layout="wide", page_title="Email Analysis Dashboard")
-st.title('📧 Email Analysis Dashboard')
-
-# Create three main columns
-col1, col2, col3 = st.columns([1, 1, 1])
-
-# Left Column - Insights
-with col1:
-    st.subheader('🔍 Process Analysis')
-    
-    # Add options for analysis
-    col1_1, col1_2 = st.columns(2)
-    with col1_1:
-        include_analyzed = st.checkbox('Include previously analyzed emails', value=False)
-    with col1_2:
-        batch_size = st.number_input('Batch Size', min_value=5, max_value=20, value=10, step=5)
-    
-    # Add similarity batching options
-    col1_3, col1_4 = st.columns(2)
-    with col1_3:
-        use_similarity = st.checkbox('Use Similarity Batching', value=False)
-    with col1_4:
-        similarity_threshold = st.slider(
-            'Similarity Threshold',
-            min_value=0.5,
-            max_value=0.9,
-            value=0.7,
-            step=0.1,
-            help='Higher values mean emails need to be more similar to be grouped together'
-        )
-    
-    if st.button('Update Insights'):
-        with st.spinner('Analyzing...'):
-            insights = get_insights(
-                include_analyzed=include_analyzed,
-                batch_size=batch_size,
-                use_similarity_batching=use_similarity,
-                similarity_threshold=similarity_threshold
+def create_visualizations(emails_data):
+    """Create visualizations for the email data"""
+    try:
+        # Create tabs for different visualizations
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📊 Incident Distribution", 
+            "📈 Severity Analysis",
+            "⏰ Timeline",
+            "🔍 Vector Analysis"
+        ])
+        
+        with tab1:
+            # Create pie chart for incident type distribution
+            incident_counts = pd.DataFrame(emails_data)['Incident Type'].value_counts()
+            fig1 = px.pie(
+                values=incident_counts.values,
+                names=incident_counts.index,
+                title='Distribution of Incident Types',
+                hole=0.4,  # Create donut chart
+                color_discrete_sequence=px.colors.qualitative.Set3
             )
-            st.session_state['insights'] = insights
-            logger.info("Insights updated in session state")
+            fig1.update_traces(
+                textposition='inside',
+                textinfo='percent+label',
+                pull=[0.1] * len(incident_counts)  # Add pull effect
+            )
+            fig1.update_layout(
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="center",
+                    x=0.5
+                )
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+            
+        with tab2:
+            # Create bar chart for severity distribution
+            severity_counts = pd.DataFrame(emails_data)['Severity'].value_counts()
+            severity_order = ['Critical', 'High', 'Medium', 'Low']
+            severity_counts = severity_counts.reindex(severity_order)
+            
+            fig2 = px.bar(
+                x=severity_counts.index,
+                y=severity_counts.values,
+                title='Distribution of Severity Levels',
+                color=severity_counts.index,
+                color_discrete_map={
+                    'Critical': '#FF0000',
+                    'High': '#FFA500',
+                    'Medium': '#FFD700',
+                    'Low': '#90EE90'
+                }
+            )
+            fig2.update_layout(
+                xaxis_title='Severity Level',
+                yaxis_title='Count',
+                showlegend=False
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+            
+        with tab3:
+            # Create timeline visualization
+            df = pd.DataFrame(emails_data)
+            df['Created At'] = pd.to_datetime(df['Created At'])
+            timeline_data = df.groupby(df['Created At'].dt.date).size().reset_index()
+            timeline_data.columns = ['Date', 'Count']
+            
+            fig3 = px.line(
+                timeline_data,
+                x='Date',
+                y='Count',
+                title='Incident Timeline',
+                markers=True
+            )
+            fig3.update_traces(
+                line=dict(width=3),
+                marker=dict(size=8)
+            )
+            fig3.update_layout(
+                xaxis_title='Date',
+                yaxis_title='Number of Incidents',
+                hovermode='x unified'
+            )
+            st.plotly_chart(fig3, use_container_width=True)
+            
+        with tab4:
+            # Vector Analysis
+            st.subheader("Vector Space Analysis")
+            
+            # Extract vectors from the data
+            vectors = []
+            for email in emails_data:
+                if 'vector_values' in email and email['vector_values'] is not None:
+                    vectors.append(email['vector_values'])
+            
+            if vectors:
+                # Convert to numpy array
+                vectors = np.array(vectors)
+                
+                # Use t-SNE for dimensionality reduction
+                tsne = TSNE(n_components=2, random_state=42)
+                vectors_2d = tsne.fit_transform(vectors)
+                
+                # Create scatter plot
+                fig4 = px.scatter(
+                    x=vectors_2d[:, 0],
+                    y=vectors_2d[:, 1],
+                    title='Email Vector Space (t-SNE)',
+                    labels={'x': 't-SNE 1', 'y': 't-SNE 2'},
+                    color=[email['Incident Type'] for email in emails_data if 'vector_values' in email and email['vector_values'] is not None],
+                    hover_data=[email['Subject'] for email in emails_data if 'vector_values' in email and email['vector_values'] is not None]
+                )
+                fig4.update_traces(
+                    marker=dict(size=10),
+                    selector=dict(mode='markers')
+                )
+                st.plotly_chart(fig4, use_container_width=True)
+                
+                # Create similarity matrix
+                similarity_matrix = cosine_similarity(vectors)
+                fig5 = px.imshow(
+                    similarity_matrix,
+                    title='Email Similarity Matrix',
+                    labels=dict(x='Email Index', y='Email Index', color='Similarity'),
+                    color_continuous_scale='Viridis'
+                )
+                st.plotly_chart(fig5, use_container_width=True)
+            else:
+                st.warning("No vector data available for analysis")
+                
+    except Exception as e:
+        st.error(f"Error creating visualizations: {str(e)}")
+        logging.error(f"Error creating visualizations: {str(e)}")
+        return None
 
-    if 'insights' in st.session_state:
-        st.markdown(f"**Last Updated:** {st.session_state['insights']['last_updated']}")
-        
-        # Display analysis statistics
-        stats = st.session_state['insights']['analysis_stats']
-        st.markdown("### 📊 Analysis Statistics")
-        st.markdown(f"""
-        - Total Emails: {stats.get('total_emails', 0)}
-        - Emails Analyzed: {stats.get('analyzed_emails', 0)}
-        - Emails Referenced: {stats.get('referenced_emails', 0)}
-        - Batches Processed: {stats.get('batches_processed', 0)}
-        - Batching Method: {stats.get('batching_method', 'N/A')}
-        """)
-        
-        with st.expander("Procedural Deviations", expanded=True):
-            st.write(st.session_state['insights']['procedural_deviations'])
-        
-        with st.expander("Recurrence Indicators", expanded=True):
-            st.write(st.session_state['insights']['recurrence_indicators'])
-        
-        with st.expander("Systemic Trends", expanded=True):
-            st.write(st.session_state['insights']['systemic_trends'])
+# Update the UI layout
+st.set_page_config(
+    layout="wide",
+    page_title="Email Analysis Dashboard",
+    page_icon="📧",
+    initial_sidebar_state="expanded"
+)
 
-# Middle Column - Data Management
-with col2:
-    st.subheader('📥 Data Management')
+# Add custom CSS for a modern, high-contrast look
+st.markdown("""
+    <style>
+    /* Sidebar styling */
+    section[data-testid="stSidebar"] {
+        background: #23272f !important;
+        color: #fff !important;
+    }
+    .st-emotion-cache-1v0mbdj, .st-emotion-cache-6qob1r {
+        background: #23272f !important;
+        color: #fff !important;
+    }
+    .st-emotion-cache-1v0mbdj h1, .st-emotion-cache-1v0mbdj h2, .st-emotion-cache-1v0mbdj h3, .st-emotion-cache-1v0mbdj h4, .st-emotion-cache-1v0mbdj h5, .st-emotion-cache-1v0mbdj h6 {
+        color: #fff !important;
+    }
+    /* Main area */
+    .stApp {
+        background-color: #f9f9fb;
+    }
+    /* Card/box styling */
+    .stMarkdown, .stTextArea, .stSelectbox, .stCheckbox, .stRadio, .stFileUploader, .stDataFrameContainer, .stTabs, .stButton, .st-bb, .st-cq, .st-cx {
+        background: #fff !important;
+        color: #23272f !important;
+        border-radius: 8px !important;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06) !important;
+    }
+    /* Button styling */
+    .stButton>button {
+        width: 100%;
+        border-radius: 5px;
+        height: 3em;
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        font-weight: 600;
+        font-size: 1.05em;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background-color: #388e3c;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.15);
+    }
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 2rem;
+    }
+    .stTabs [data-baseweb="tab"] {
+        height: 3.5rem;
+        white-space: pre-wrap;
+        background-color: #fff;
+        border-radius: 6px 6px 0 0;
+        gap: 1rem;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        color: #23272f;
+        font-weight: 500;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+    }
+    .stTabs [aria-selected="true"] {
+        background-color: #4CAF50;
+        color: #fff;
+    }
+    /* Widget backgrounds */
+    .stTextArea>div>div>textarea,
+    .stSelectbox>div>div,
+    .stCheckbox>div>div,
+    .stRadio>div>div,
+    .stFileUploader>div>div {
+        background-color: #fff !important;
+        color: #23272f !important;
+    }
+    /* Progress bar and spinner */
+    .stProgress>div>div>div {
+        background-color: #4CAF50;
+    }
+    .stSpinner>div>div {
+        border-color: #4CAF50;
+    }
+    /* General text color for main area */
+    .stApp, .stApp * {
+        color: #23272f;
+    }
+    /* Sidebar radio and text color */
+    .st-emotion-cache-1v0mbdj .stRadio label, .st-emotion-cache-1v0mbdj .stRadio span, .st-emotion-cache-1v0mbdj .stMarkdown, .st-emotion-cache-1v0mbdj .stTextInput, .st-emotion-cache-1v0mbdj .stSelectbox {
+        color: #fff !important;
+    }
+    /* Sidebar selected radio dot */
+    .st-emotion-cache-1v0mbdj .stRadio [data-baseweb="radio"] [aria-checked="true"] {
+        background: #4CAF50 !important;
+        border-color: #4CAF50 !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Create a sidebar for navigation
+with st.sidebar:
+    st.title("📧 Navigation")
+    page = st.radio(
+        "Select Page",
+        ["Dashboard", "Data Management", "Analysis", "Settings"],
+        index=0
+    )
+
+# Place this at the top, before the main page logic
+def show_dashboard():
+    st.title("📊 Email Analysis Dashboard")
+    col1, col2, col3 = st.columns([1.2, 1, 0.8])
+    with col1:
+        st.subheader("📈 Insights")
+        insights = get_insights()
+        if insights and insights['email_count'] > 0:
+            st.markdown(f"**Last Updated:** {insights['last_updated']}")
+            st.markdown("**Procedural Deviations:**")
+            st.write(insights['procedural_deviations'])
+            st.markdown("**Recurrence Indicators:**")
+            st.write(insights['recurrence_indicators'])
+            st.markdown("**Systemic Trends:**")
+            st.write(insights['systemic_trends'])
+        else:
+            st.info("No emails found in the database. Please go to the 'Data Management' page and import/upload your email data to get started.")
+    with col2:
+        st.subheader("📊 Visualizations")
+        conn = get_db_connection()
+        emails_data = conn.execute('''
+            SELECT id, email_subject, email_text_body, email_to, email_from,
+                   incident_type, severity, created_at
+            FROM emails
+            ORDER BY created_at DESC
+        ''').fetchall()
+        if emails_data:
+            emails_list = []
+            for email in emails_data:
+                emails_list.append({
+                    'ID': email[0],
+                    'Subject': email[1],
+                    'Body': email[2],
+                    'To': email[3],
+                    'From': email[4],
+                    'Incident Type': email[5],
+                    'Severity': email[6],
+                    'Created At': email[7]
+                })
+            create_visualizations(emails_list)
+        else:
+            st.info("No email data available for visualization. Please import emails in the 'Data Management' page.")
+    with col3:
+        st.subheader("🔍 AI Query")
+        query_text = st.text_area("Ask a question about the emails:", height=100)
+        if st.button("Get Answer"):
+            if query_text:
+                with st.spinner("Analyzing..."):
+                    context, _ = get_email_context(query_text=query_text)
+                    response = query_llm_with_context(query_text, context)
+                    st.write(response)
+            else:
+                st.warning("Please enter a question")
+
+# Main content area
+if page == "Dashboard":
+    show_dashboard()
+
+elif page == "Data Management":
+    st.title("📥 Data Management")
     
-    # Import Section
-    bulk_email_json = st.text_area(
-        label="Paste email JSON",
-        height=100,
-        key="bulk_email_json"
+    # Add data management controls
+    st.subheader("Import Emails")
+    uploaded_file = st.file_uploader("Upload email data (JSON format)", type=['json'])
+    if uploaded_file is not None:
+        try:
+            emails_data = json.load(uploaded_file)
+            if st.button("Import Emails"):
+                with st.spinner("Importing emails..."):
+                    success, errors, error_messages = store_multiple_emails(emails_data)
+                    if success > 0:
+                        st.success(f"✅ Successfully imported {success} emails")
+                    if errors > 0:
+                        st.error(f"❌ Failed to import {errors} emails")
+                        for msg in error_messages:
+                            st.error(msg)
+        except Exception as e:
+            st.error(f"Error processing file: {str(e)}")
+    
+    # Add vector store management
+    add_vector_store_management()
+    
+    # Add database management
+    st.subheader("Database Management")
+    col1, col2 = st.columns(2)
+    with col1:
+        add_reinitialize_button()
+    with col2:
+        add_recategorize_button()
+    
+elif page == "Analysis":
+    st.title("🔍 Analysis")
+    
+    # Add analysis controls
+    st.subheader("Email Analysis")
+    include_analyzed = st.checkbox("Include already analyzed emails")
+    use_similarity = st.checkbox("Use similarity-based batching")
+    
+    if st.button("Generate Analysis"):
+        with st.spinner("Generating analysis..."):
+            insights = get_insights(include_analyzed=include_analyzed, use_similarity_batching=use_similarity)
+            if insights:
+                st.markdown(f"**Last Updated:** {insights['last_updated']}")
+                st.markdown("**Procedural Deviations:**")
+                st.write(insights['procedural_deviations'])
+                st.markdown("**Recurrence Indicators:**")
+                st.write(insights['recurrence_indicators'])
+                st.markdown("**Systemic Trends:**")
+                st.write(insights['systemic_trends'])
+                
+                # Show analysis statistics
+                st.subheader("Analysis Statistics")
+                stats = insights['analysis_stats']
+                st.markdown(f"""
+                - Total Emails: {stats['total_emails']}
+                - Analyzed Emails: {stats['analyzed_emails']}
+                - Referenced Emails: {stats['referenced_emails']}
+                - Batches Processed: {stats['batches_processed']}
+                - Batching Method: {stats['batching_method']}
+                """)
+    
+elif page == "Settings":
+    st.title("⚙️ Settings")
+    
+    st.subheader("Model Settings")
+    
+    model_provider = st.selectbox(
+        "Select Model Provider",
+        ["groq", "deepseek"],
+        index=0
     )
     
-    if st.button('Import Emails'):
-        if bulk_email_json:
-            try:
-                emails_data = json.loads(bulk_email_json)
-                if not isinstance(emails_data, list):
-                    emails_data = [emails_data]
-                
-                with st.spinner('Importing emails...'):
-                    success_count, error_count, error_messages = store_multiple_emails(emails_data)
-                    st.success(f'✅ Imported {success_count} emails!')
-                    if error_count > 0:
-                        st.error(f'❌ Failed to import {error_count} emails')
-                        for error in error_messages:
-                            st.error(error)
-            except Exception as e:
-                st.error(f'Error processing import: {str(e)}')
-        else:
-            st.warning('Please paste email JSON data to import.')
+    if model_provider == "groq":
+        st.markdown("### Groq Settings")
+        st.markdown(f"Current Model: {GROQ_MODEL}")
+        st.markdown(f"Max Tokens: {os.getenv('GROQ_MAX_TOKENS', 8192)}")
+        st.markdown(f"Temperature: {os.getenv('GROQ_TEMPERATURE', 0.5)}")
+    else:
+        st.markdown("### DeepSeek Settings")
+        st.markdown(f"Current Model: {DEEPSEEK_MODEL}")
+        st.markdown(f"Max Tokens: {os.getenv('DEEPSEEK_MAX_TOKENS', 8192)}")
+        st.markdown(f"Temperature: {os.getenv('DEEPSEEK_TEMPERATURE', 0.5)}")
     
-    # Clear Section
-    if st.button('🗑️ Clear All Data', type='primary', help='Warning: This will permanently delete all emails and analysis data'):
-        if st.checkbox('I understand this will permanently delete all data'):
-            if clear_emails_table():
-                st.success('✅ All data cleared successfully!')
-                st.rerun()
-            else:
-                st.error('❌ Failed to clear data')
-        else:
-            st.warning('Please confirm that you understand this action cannot be undone')
+    st.subheader("Database Settings")
+    db_size = get_db_size()
+    st.markdown(f"Current Database Size: {db_size / 1024 / 1024:.2f} MB")
     
-    add_reinitialize_button()  # Now this will work because the function is defined above
-    
-    # Show Analysis Results Button
-    if st.button('📊 Show Analysis Results'):
-        try:
-            # Query analysis results joined with emails
-            query = '''
-                SELECT 
-                    ar.email_id,
-                    e.email_subject,
-                    ar.procedural_deviations,
-                    ar.recurrence_indicators,
-                    ar.systemic_trends,
-                    ar.analysis_date
-                FROM analysis_results_new ar
-                JOIN emails e ON ar.email_id = e.id
-                ORDER BY ar.analysis_date DESC
-            '''
-            analysis_results = conn.execute(query).fetchdf()
+    st.subheader("Vector Store Settings")
+    vector_stats = get_vector_store_stats()
+    if vector_stats:
+        st.markdown(f"""
+        - Total Documents: {vector_stats['total_documents']}
+        - Index Name: {vector_stats['index_name']}
+        - Vector Dimension: {vector_stats['dimension']}
+        """)
 
-            if not analysis_results.empty:
-                # Format datetime column
-                analysis_results['analysis_date'] = analysis_results['analysis_date'].dt.strftime('%Y-%m-%d %H:%M:%S')
+def get_insights_from_pinecone(batch_size=10, use_similarity_batching=False, similarity_threshold=0.7):
+    logger.info("Starting insights generation (Pinecone)")
+    all_emails = fetch_all_pinecone_emails(limit=1000)  # Adjust limit as needed
 
-                # Rename columns for better display
-                analysis_results = analysis_results.rename(columns={
-                    'email_id': 'Email ID',
-                    'email_subject': 'Subject',
-                    'procedural_deviations': 'Procedural Deviations',
-                    'recurrence_indicators': 'Recurrence Indicators',
-                    'systemic_trends': 'Systemic Trends',
-                    'analysis_date': 'Analysis Date'
-                })
+    if not all_emails:
+        logger.info("No emails found in Pinecone")
+        return {
+            'last_updated': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'procedural_deviations': 'No emails found in Pinecone',
+            'recurrence_indicators': 'No emails found in Pinecone',
+            'systemic_trends': 'No emails found in Pinecone',
+            'email_count': 0,
+            'analysis_stats': {
+                'total_emails': 0,
+                'analyzed_emails': 0,
+                'referenced_emails': 0,
+                'batches_processed': 0
+            }
+        }
 
-                # Display the analysis results table
-                st.dataframe(analysis_results, use_container_width=True)
-            else:
-                st.info("No analysis results found in the database.")
-        except Exception as e:
-            logger.error(f"Error displaying analysis results: {str(e)}")
-            st.error("Error displaying analysis results. Please check the logs for details.")
+    # Prepare batches for your LLM analysis
+    # all_emails should be a list of dicts with keys: id, body, subject, etc.
+    # You may need to adapt your batching logic to this format.
+    if use_similarity_batching:
+        batches = create_similarity_batches([(e['id'], e['body'], e['subject']) for e in all_emails], batch_size, similarity_threshold)
+    else:
+        batches = [[(e['id'], e['body'], e['subject']) for e in all_emails][i:i + batch_size] for i in range(0, len(all_emails), batch_size)]
 
-    # Add recategorize button to UI
-    add_recategorize_button()  # Add this line after other buttons
-    add_vector_store_management()  # Add this line
+    # ... (rest of your insight generation logic, unchanged) ...
 
-# Right Column - RAG Query Interface
-with col3:
-    st.subheader('🤖 AI Query Interface')
-    
-    # Create a container for model selection with a border
-    with st.container():
-        st.markdown("### Model Selection")
-        model_choice = st.radio(
-            "Select Query Model",
-            options=['groq', 'deepseek'],
-            format_func=lambda x: 'Groq (Fast)' if x == 'groq' else 'DeepSeek (High Quality)',
-            help="Groq is faster but DeepSeek may provide more detailed analysis",
-            horizontal=True  # Make it horizontal for better space usage
-        )
-        
-        # Show model details in an expander
-        with st.expander("Model Details", expanded=False):
-            if model_choice == 'groq':
-                st.markdown(f"**Current Model:** {GROQ_MODEL}")
-                st.markdown("**Features:**")
-                st.markdown("- Fast response times")
-                st.markdown("- Good for quick analysis")
-                st.markdown("- Suitable for most queries")
-            else:
-                st.markdown(f"**Current Model:** {DEEPSEEK_MODEL}")
-                st.markdown("**Features:**")
-                st.markdown("- High-quality responses")
-                st.markdown("- Better for complex analysis")
-                st.markdown("- More detailed insights")
-    
-    # Create a container for query input with a border
-    with st.container():
-        st.markdown("### Query Input")
-        query = st.text_area(
-            label="Ask a question about the emails",
-            height=100,
-            placeholder="Example: What are the most common maintenance issues reported?",
-            key="rag_query"
-        )
-        
-        # Get total analyzed emails for dynamic slider
-        total_analyzed = get_total_analyzed_emails()
-        max_emails = max(total_analyzed, 100)  # At least 100, or total analyzed if higher
-        
-        # Context size control with dynamic limits
-        st.markdown("### Context Settings")
-        col3_1, col3_2 = st.columns(2)
-        with col3_1:
-            context_size = st.slider(
-                "Number of recent emails",
-                min_value=5,
-                max_value=max_emails,
-                value=min(20, max_emails),
-                step=5,
-                help="How many recent emails to include in the context"
-            )
-        with col3_2:
-            days_back = st.slider(
-                "Days to look back",
-                min_value=1,
-                max_value=90,
-                value=30,
-                step=1,
-                help="How far back to look for relevant emails"
-            )
-    
-    # Query button in its own container
-    with st.container():
-        if st.button('🔍 Analyze Emails', use_container_width=True):
-            if query:
-                with st.spinner(f'Analyzing emails using {model_choice}...'):
-                    # Get context from analyzed emails
-                    context, num_emails = get_email_context(context_size, query, days_back=days_back)
-                    
-                    # Show context information in an expander
-                    with st.expander("Context Information", expanded=False):
-                        st.info(f"Using {num_emails} emails for context (requested: {context_size})")
-                        st.markdown(f"Total analyzed emails available: {total_analyzed}")
-                    
-                    # Query LLM with context and selected model
-                    response = query_llm_with_context(query, context, model_choice)
-                    
-                    # Store in session state
-                    st.session_state['last_query'] = {
-                        'query': query,
-                        'response': response,
-                        'model': model_choice,
-                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                        'context_size': len(context.split('\n')),
-                        'requested_size': context_size,
-                        'total_available': total_analyzed,
-                        'num_emails_used': num_emails,
-                        'days_back': days_back
-                    }
-            else:
-                st.warning('Please enter a question to analyze.')
-    
-    # Display last query result in a clean container
-    if 'last_query' in st.session_state:
-        with st.container():
-            st.markdown("### Analysis Results")
-            
-            # Query details in an expander
-            with st.expander("Query Details", expanded=False):
-                st.markdown(f"**Timestamp:** {st.session_state['last_query']['timestamp']}")
-                st.markdown(f"**Model Used:** {st.session_state['last_query']['model'].upper()}")
-                st.markdown(f"**Context:** {st.session_state['last_query']['num_emails_used']} emails, {st.session_state['last_query']['days_back']} days back")
-            
-            # Display the query and response in a clean format
-            st.markdown("#### Question")
-            st.markdown(f"_{st.session_state['last_query']['query']}_")
-            
-            st.markdown("#### Response")
-            st.markdown(st.session_state['last_query']['response'])
-
-# Footer with metrics - make it more compact
-st.markdown("---")
-st.markdown("### 📊 Dashboard Status")
-status_col1, status_col2, status_col3, status_col4 = st.columns(4)
-
-with status_col1:
-    try:
-        conn = get_db_connection()
-        if conn:
-            try:
-                count = conn.execute("SELECT COUNT(*) FROM emails").fetchone()[0]
-                analyzed = conn.execute("SELECT COUNT(*) FROM emails WHERE is_analyzed = TRUE").fetchone()[0]
-                st.metric("Total Emails", count, f"{analyzed} analyzed")
-            except Exception as e:
-                if "Table with name emails does not exist" in str(e):
-                    st.metric("Total Emails", "0", "0 analyzed")
-                else:
-                    logger.error(f"Error getting email count: {str(e)}")
-                    st.metric("Total Emails", "Error")
-        else:
-            st.metric("Total Emails", "Error")
-    except Exception as e:
-        logger.error(f"Error getting email count: {str(e)}")
-        st.metric("Total Emails", "Error")
-
-with status_col2:
-    st.metric("Last Update", datetime.now().strftime('%H:%M:%S'))
-
-with status_col3:
-    if st.button('📋 View Emails', use_container_width=True):
-        try:
-            conn = get_db_connection()
-            query = '''
-                SELECT 
-                    e.id,
-                    e.email_subject,
-                    e.email_to,
-                    e.email_from,
-                    e.incident_type,
-                    e.severity,
-                    e.email_text_body,
-                    e.is_analyzed,
-                    e.analyzed_at,
-                    e.created_at
-                FROM emails e
-                ORDER BY e.id DESC
-            '''
-            emails = conn.execute(query).fetchdf()
-            
-            if not emails.empty:
-                # Format the dataframe for display
-                emails['analyzed_at'] = emails['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                emails['created_at'] = emails['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                emails['is_analyzed'] = emails['is_analyzed'].map({True: '✅', False: '❌'})
-                emails['email_text_body'] = emails['email_text_body'].apply(
-                    lambda x: x[:100] + '...' if len(str(x)) > 100 else x
-                )
-                
-                # Rename and reorder columns
-                emails = emails.rename(columns={
-                    'id': 'ID',
-                    'email_subject': 'Subject',
-                    'email_to': 'To',
-                    'email_from': 'From',
-                    'incident_type': 'Incident Type',
-                    'severity': 'Severity',
-                    'email_text_body': 'Body Preview',
-                    'is_analyzed': 'Analyzed',
-                    'analyzed_at': 'Analyzed At',
-                    'created_at': 'Created At'
-                })
-                
-                # Display with better formatting
-                st.dataframe(
-                    emails[['ID', 'Subject', 'To', 'From', 'Incident Type', 'Severity', 'Body Preview', 'Analyzed', 'Analyzed At', 'Created At']],
-                    use_container_width=True,
-                    column_config={
-                        "Body Preview": st.column_config.TextColumn(
-                            "Body Preview",
-                            width="large",
-                            help="First 100 characters of the email body"
-                        ),
-                        "Subject": st.column_config.TextColumn(
-                            "Subject",
-                            width="medium"
-                        ),
-                        "To": st.column_config.TextColumn(
-                            "To",
-                            width="medium"
-                        ),
-                        "From": st.column_config.TextColumn(
-                            "From",
-                            width="medium"
-                        ),
-                        "Incident Type": st.column_config.TextColumn(
-                            "Incident Type",
-                            width="small"
-                        ),
-                        "Severity": st.column_config.TextColumn(
-                            "Severity",
-                            width="small"
-                        ),
-                        "ID": st.column_config.NumberColumn(
-                            "ID",
-                            width="small"
-                        ),
-                        "Analyzed": st.column_config.TextColumn(
-                            "Analyzed",
-                            width="small"
-                        ),
-                        "Analyzed At": st.column_config.TextColumn(
-                            "Analyzed At",
-                            width="medium"
-                        ),
-                        "Created At": st.column_config.TextColumn(
-                            "Created At",
-                            width="medium"
-                        )
-                    }
-                )
-            else:
-                st.info("No emails found in the database.")
-        except Exception as e:
-            logger.error(f"Error displaying table: {str(e)}")
-            st.error("Error displaying table. Please check the logs for details.")
-
-with status_col4:
-    if st.button('🤖 Model Info', use_container_width=True):
-        with st.expander("Available Models", expanded=True):
-            # Show DeepSeek models
-            st.markdown("**DeepSeek Models:**")
-            deepseek_models = get_available_deepseek_models()
-            if deepseek_models:
-                for model in sorted(deepseek_models):
-                    st.markdown(f"- {model}")
-                st.markdown(f"**Current:** {DEEPSEEK_MODEL}")
-            else:
-                st.error("Could not fetch DeepSeek models")
-            
-            # Show Groq model
-            st.markdown("**Groq Model:**")
-            st.markdown(f"- {GROQ_MODEL}")
+def fetch_all_pinecone_emails(limit=1000):
+    index = init_pinecone()
+    if not index:
+        return []
+    # Pinecone doesn't have a "fetch all", so we use a zero vector and high top_k
+    results = index.query(vector=[0]*384, top_k=limit, include_metadata=True)
+    emails = []
+    for match in results.matches:
+        meta = match.metadata
+        emails.append({
+            'id': match.id,
+            'subject': meta.get('subject', ''),
+            'body': meta.get('text_body', ''),
+            'incident_type': meta.get('incident_type', 'Others'),
+            'severity': meta.get('severity', 'Low'),
+            'created_at': meta.get('created_at', ''),
+            'reasoning': meta.get('reasoning', ''),
+        })
+    return emails
 
