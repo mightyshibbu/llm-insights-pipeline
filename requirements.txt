@@ -13,3 +13,4 @@ openai>=1.0.0  # For OpenAI embeddings (optional)
 plotly
 logger
 lxml
+anthropic  

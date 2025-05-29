@@ -1,0 +1,16 @@
+plugins.security.disabled: true
+network.host: 0.0.0.0
+http.port: 9200
+transport.port: 9300
+
+# Basic settings
+bootstrap.memory_lock: true
+cluster.name: "docker-cluster"
+discovery.type: single-node
+
+# KNN settings for OpenSearch 3.0.0
+knn.memory.circuit_breaker.enabled: true
+knn.memory.circuit_breaker.limit: 50%
+knn.algo_param.index_thread_qty: 1
+knn.cache.item.expiry.enabled: true
+knn.cache.item.expiry.minutes: 1440m 

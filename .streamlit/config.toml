@@ -1,0 +1,17 @@
+[watcher]
+exclude_globs = ["*/torch/*", "*/torchvision/*", "*/torchaudio/*"]
+
+[server]
+runOnSave = false
+enableCORS = false
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+primaryColor = "#FF4B4B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif" 

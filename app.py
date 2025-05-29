@@ -1,6 +1,13 @@
 import os
 os.environ["STREAMLIT_WATCHER_PATCH_MODULES"] = "false"
 
+# Add torch import fix
+try:
+    import torch
+    torch.classes = None  # Prevent Streamlit from inspecting torch C++ extensions
+except ImportError:
+    pass  # Ignore if torch is not installed
+
 import streamlit as st
 import psutil
 import socket
@@ -9,6 +16,7 @@ import time
 from pathlib import Path
 import logging
 import re
+import anthropic  # Add at the top with other imports
 
 # Configure logging first
 logging.basicConfig(
@@ -169,6 +177,9 @@ DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 DEEPSEEK_MODEL = os.getenv('DEEPSEEK_MODEL', 'deepseek-chat').strip()  # Remove any whitespace
 GROQ_MODEL = os.getenv('GROQ_MODEL', 'llama-3.3-70b-versatile')
 
+# Add after the existing model configurations
+MODEL_PROVIDER = os.getenv('MODEL_PROVIDER', 'groq')  # Default to groq, can be 'deepseek' or 'groq'
+
 # Helper function to safely parse environment variables
 def safe_env_int(var_name, default):
     value = os.getenv(var_name, str(default))
@@ -213,17 +224,51 @@ QUERY_MODEL_CONFIGS = {
 # Analysis model configuration (using DeepSeek)
 ANALYSIS_MODEL_CONFIG = {
     'large': {
-        'name': DEEPSEEK_MODEL,
-        'max_tokens': 4096,
-        'temperature': 0.3,
-        'use_cases': ['complex_analysis', 'summarization', 'pattern_detection']
+        'groq': {
+            'name': GROQ_MODEL,
+            'max_tokens': 2048,  # Reduced from 4096
+            'temperature': 0.3,
+            'use_cases': ['complex_analysis', 'summarization', 'pattern_detection']
+        },
+        'deepseek': {
+            'name': DEEPSEEK_MODEL,
+            'max_tokens': 2048,  # Reduced from 4096
+            'temperature': 0.3,
+            'use_cases': ['complex_analysis', 'summarization', 'pattern_detection']
+        }
     },
     'small': {
-        'name': DEEPSEEK_MODEL,
-        'max_tokens': 2048,
-        'temperature': 0.2,
-        'use_cases': ['simple_queries', 'factual_lookup', 'basic_summary']
+        'groq': {
+            'name': GROQ_MODEL,
+            'max_tokens': 1024,  # Reduced from 2048
+            'temperature': 0.2,
+            'use_cases': ['simple_queries', 'factual_lookup', 'basic_summary']
+        },
+        'deepseek': {
+            'name': DEEPSEEK_MODEL,
+            'max_tokens': 1024,  # Reduced from 2048
+            'temperature': 0.2,
+            'use_cases': ['simple_queries', 'factual_lookup', 'basic_summary']
+        }
     }
+}
+
+# Load Anthropic API key
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022'
+
+# Add Anthropic model config with conservative token limits
+ANALYSIS_MODEL_CONFIG['small']['anthropic'] = {
+    'name': ANTHROPIC_MODEL,
+    'max_tokens': 1024,  # Reduced from 2048
+    'temperature': 0.2,
+    'use_cases': ['simple_queries', 'factual_lookup', 'basic_summary']
+}
+ANALYSIS_MODEL_CONFIG['large']['anthropic'] = {
+    'name': ANTHROPIC_MODEL,
+    'max_tokens': 2048,  # Reduced from 4096
+    'temperature': 0.3,
+    'use_cases': ['complex_analysis', 'summarization', 'pattern_detection']
 }
 
 # Add at the top with other global variables
@@ -247,7 +292,9 @@ OPENSEARCH_INDEX_SETTINGS = {
     "settings": {
         "index": {
             "number_of_shards": 1,
-            "number_of_replicas": 0
+            "number_of_replicas": 0,
+            "knn": True,
+            "knn.algo_param.ef_search": 100
         }
     },
     "mappings": {
@@ -257,15 +304,15 @@ OPENSEARCH_INDEX_SETTINGS = {
             "summary": {"type": "text"},
             "summary_vector": {
                 "type": "knn_vector",
-                "dimension": 768,  # Dimension for sentence-transformers
+                "dimension": 384,  # Updated to match all-MiniLM-L6-v2 model output
                 "method": {
                     "name": "hnsw",
                     "space_type": "l2",
-                    "engine": "nmslib",
+                    "engine": "faiss",
                     "parameters": {
                         "ef_search": 100,
-                        "ef_construction": 200,
-                        "m": 16
+                        "m": 16,
+                        "ef_construction": 200
                     }
                 }
             },
@@ -291,21 +338,60 @@ if 'embedding_model' not in st.session_state:
 # Initialize OpenSearch client
 if 'opensearch_client' not in st.session_state:
     try:
+        logger.info("Attempting to initialize OpenSearch client...")
+        logger.info(f"OpenSearch host: {OPENSEARCH_HOST}, port: {OPENSEARCH_PORT}")
+        
+        # First check if OpenSearch is accessible and get plugin info
+        try:
+            response = requests.get(f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}/_cat/plugins")
+            logger.info(f"Available OpenSearch plugins: {response.text}")
+            
+            # Check specifically for KNN plugin
+            response = requests.get(f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}/_cat/plugins?format=json")
+            plugins = response.json()
+            knn_plugin = next((p for p in plugins if 'knn' in p.get('component', '').lower()), None)
+            if knn_plugin:
+                logger.info(f"KNN plugin found: {knn_plugin}")
+            else:
+                logger.error("KNN plugin not found in OpenSearch plugins")
+                raise Exception("KNN plugin not found in OpenSearch")
+        except Exception as e:
+            logger.error(f"Failed to verify OpenSearch plugins: {str(e)}")
+            raise
+        
+        # Try to get current index settings if index exists
+        try:
+            if requests.get(f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}/{OPENSEARCH_INDEX_NAME}").status_code == 200:
+                response = requests.get(f"http://{OPENSEARCH_HOST}:{OPENSEARCH_PORT}/{OPENSEARCH_INDEX_NAME}/_settings")
+                logger.info(f"Current index settings: {response.json()}")
+        except Exception as e:
+            logger.info(f"Index does not exist or error getting settings: {str(e)}")
+        
+        # Initialize client
+        logger.info("Initializing OpenSearch client with settings...")
+        logger.info(f"Index settings to be applied: {json.dumps(OPENSEARCH_INDEX_SETTINGS, indent=2)}")
+        
         st.session_state.opensearch_client = OpenSearch(
             hosts=[{'host': OPENSEARCH_HOST, 'port': OPENSEARCH_PORT}],
             http_auth=(OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD),
-            use_ssl=True,
+            use_ssl=False,
             verify_certs=False,
             ssl_show_warn=False
         )
         
         # Create index if it doesn't exist
         if not st.session_state.opensearch_client.indices.exists(index=OPENSEARCH_INDEX_NAME):
-            st.session_state.opensearch_client.indices.create(
-                index=OPENSEARCH_INDEX_NAME,
-                body=OPENSEARCH_INDEX_SETTINGS
-            )
-            logger.info(f"Created OpenSearch index: {OPENSEARCH_INDEX_NAME}")
+            logger.info(f"Creating new index: {OPENSEARCH_INDEX_NAME}")
+            try:
+                st.session_state.opensearch_client.indices.create(
+                    index=OPENSEARCH_INDEX_NAME,
+                    body=OPENSEARCH_INDEX_SETTINGS
+                )
+                logger.info(f"Successfully created OpenSearch index: {OPENSEARCH_INDEX_NAME}")
+            except Exception as e:
+                logger.error(f"Failed to create index: {str(e)}")
+                logger.error(f"Index settings that failed: {json.dumps(OPENSEARCH_INDEX_SETTINGS, indent=2)}")
+                raise
         else:
             logger.info(f"Using existing OpenSearch index: {OPENSEARCH_INDEX_NAME}")
         
@@ -322,172 +408,6 @@ except Exception as e:
     logger.error(f"Error accessing OpenSearch client: {str(e)}")
     st.error("Failed to access OpenSearch client. Please check the logs for details.")
     st.stop()
-
-# Initialize database connection only once
-if 'db_initialized' not in st.session_state:
-    try:
-        # Get database connection without deleting existing data
-        conn = duckdb.connect(DB_PATH)
-        
-        # Check if tables exist and create them if they don't
-        try:
-            # Check if emails table exists
-            table_exists = conn.execute("""
-                SELECT name 
-                FROM sqlite_master 
-                WHERE type='table' AND name='emails'
-            """).fetchone()
-            
-            if not table_exists:
-                logger.info("Creating new database tables")
-                # Create tables with correct schema
-                conn.execute("""
-                    CREATE TABLE emails (
-                        id BIGINT PRIMARY KEY,
-                        email_subject TEXT,
-                        email_text_body TEXT,
-                        email_to TEXT,
-                        email_from TEXT,
-                        incident_type TEXT,
-                        severity TEXT,
-                        is_analyzed BOOLEAN DEFAULT FALSE,
-                        analyzed_at TIMESTAMP DEFAULT NULL,
-                        summary TEXT,
-                        analysis_quality FLOAT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-
-                conn.execute("""
-                    CREATE TABLE email_analysis (
-                        id BIGINT PRIMARY KEY,
-                        email_id BIGINT,
-                        procedural_deviations TEXT,
-                        recurrence_indicators TEXT,
-                        systemic_trends TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY (email_id) REFERENCES emails(id)
-                    )
-                """)
-
-                conn.execute("""
-                    CREATE TABLE query_cache (
-                        id BIGINT PRIMARY KEY,
-                        query_text TEXT,
-                        response_text TEXT,
-                        context_size BIGINT,
-                        model_name TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE(query_text, context_size, model_name)
-                    )
-                """)
-                logger.info("Database tables created successfully")
-            else:
-                logger.info("Using existing database tables")
-            
-            st.session_state.conn = conn
-            st.session_state.db_initialized = True
-            logger.info("Database initialized successfully")
-        except Exception as e:
-            logger.error(f"Error checking/creating database tables: {str(e)}")
-            st.error("Failed to initialize database. Please check the logs for details.")
-            st.stop()
-    except Exception as e:
-        logger.error(f"Error initializing database: {str(e)}")
-        st.error("Failed to initialize database. Please check the logs for details.")
-        st.stop()
-
-def init_database():
-    """Initialize the database and create tables if they don't exist"""
-    conn = None
-    try:
-        # Create a new connection
-        conn = duckdb.connect(DB_PATH)
-        
-        # Check if table exists and has correct schema
-        try:
-            # Get current columns
-            current_columns = conn.execute("""
-                SELECT column_name, data_type 
-                FROM information_schema.columns 
-                WHERE table_name = 'emails'
-            """).fetchall()
-            current_column_names = [col[0] for col in current_columns]
-            
-            # Define expected columns
-            expected_columns = {
-                'id', 'email_subject', 'email_text_body', 'email_to', 'email_from',
-                'incident_type', 'severity', 'is_analyzed', 'analyzed_at',
-                'summary', 'analysis_quality', 'created_at'
-            }
-            
-            # If table exists but schema doesn't match, drop and recreate
-            if current_columns and not expected_columns.issubset(set(current_column_names)):
-                logger.info("Schema mismatch detected, recreating tables...")
-                conn.execute("DROP TABLE IF EXISTS email_analysis")  # Drop dependent table first
-                conn.execute("DROP TABLE IF EXISTS emails")
-                conn.execute("DROP TABLE IF EXISTS query_cache")
-                logger.info("Old tables dropped")
-        except Exception as e:
-            logger.warning(f"Error checking schema, will create new tables: {str(e)}")
-            # If we can't check schema, drop tables to be safe
-            conn.execute("DROP TABLE IF EXISTS email_analysis")
-            conn.execute("DROP TABLE IF EXISTS emails")
-            conn.execute("DROP TABLE IF EXISTS query_cache")
-        
-        # Create tables with correct schema - using BIGINT consistently
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS emails (
-                id BIGINT PRIMARY KEY,
-                email_subject TEXT,
-                email_text_body TEXT,
-                email_to TEXT,
-                email_from TEXT,
-                incident_type TEXT,
-                severity TEXT,
-                is_analyzed BOOLEAN DEFAULT FALSE,
-                analyzed_at TIMESTAMP DEFAULT NULL,
-                summary TEXT,
-                analysis_quality FLOAT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS email_analysis (
-                id BIGINT PRIMARY KEY,
-                email_id BIGINT,  -- Changed to BIGINT to match emails.id
-                procedural_deviations TEXT,
-                recurrence_indicators TEXT,
-                systemic_trends TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (email_id) REFERENCES emails(id)
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS query_cache (
-                id BIGINT PRIMARY KEY,  -- Changed to BIGINT for consistency
-                query_text TEXT,
-                response_text TEXT,
-                context_size BIGINT,  -- Changed to BIGINT for consistency
-                model_name TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(query_text, context_size, model_name)
-            )
-        """)
-            
-        logger.info("Database tables initialized with correct schema")
-        return conn  # Return the connection object
-            
-    except Exception as e:
-        logger.error(f"Error initializing database: {str(e)}")
-        if conn is not None:
-            try:
-                conn.close()
-            except:
-                pass
-        return None  # Return None on error
 
 def get_db_connection():
     """Get a database connection, creating one if it doesn't exist"""
@@ -742,17 +662,32 @@ def get_deepseek_response(messages, model_config, model_name):
         raise
 
 def get_groq_response(messages, model_config):
-    """Make a request to Groq API for queries"""
+    """Get response from Groq API with proper error handling"""
     try:
-        response = groq_client.chat.completions.create(
-            model=model_config['name'],
-            messages=messages,
-            temperature=model_config['temperature'],
-            max_tokens=model_config['max_tokens'],
-            top_p=model_config['top_p'],
-            frequency_penalty=model_config['frequency_penalty']
-        )
-        return response.choices[0].message.content
+        # Validate and ensure max_tokens is a valid integer
+        max_tokens = model_config.get('max_tokens')
+        if not isinstance(max_tokens, int) or max_tokens <= 0:
+            logger.warning(f"Invalid max_tokens value: {max_tokens}, using default of 2048")
+            max_tokens = 2048  # Default to a reasonable value
+        
+        # Only include supported parameters
+        request_params = {
+            'model': model_config['name'],
+            'messages': messages,
+            'temperature': model_config.get('temperature', 0.5),
+            'max_tokens': max_tokens
+        }
+        
+        # Add optional parameters if they exist
+        if 'top_p' in model_config:
+            request_params['top_p'] = model_config['top_p']
+        if 'frequency_penalty' in model_config:
+            request_params['frequency_penalty'] = model_config['frequency_penalty']
+        
+        logger.info(f"Making Groq API request with model: {model_config['name']}, max_tokens: {max_tokens}")
+        response = groq_client.chat.completions.create(**request_params)
+        logger.info("Successfully received response from Groq API")
+        return response
     except Exception as e:
         logger.error(f"Error calling Groq API: {str(e)}")
         raise
@@ -809,27 +744,13 @@ def check_model_availability(model_name):
         logger.warning(f"Model {model_name} not available: {str(e)}")
         return False
 
-def summarize_emails_bulk(batch, model_name):
-    """Summarize multiple emails in a single LLM call - Uses DeepSeek API directly"""
+def summarize_emails_bulk(batch, model_name=None):
+    """Generate summaries for a batch of emails using the configured model provider"""
     try:
-        # Prepare context with all emails in the batch
-        context = "Summarize these maintenance/service emails in ONE sentence each, focusing on the most critical issue or action needed:\n\n"
-        for id, text_body, subject in batch:
-            # Clean and truncate text to avoid token limits
-            clean_text = text_body[:1000] if len(text_body) > 1000 else text_body
-            context += f"Email ID {id}:\nSubject: {subject}\nBody: {clean_text}\n\n"
-        
-        # Use large model for summarization as it's a complex task
-        model_config = select_model('summarization')
-        # Reduce max tokens for summary
-        model_config['max_tokens'] = min(model_config['max_tokens'], 1000)  # Increased from 500
-        model_config['temperature'] = 0.3  # Lower temperature for more consistent summaries
-        
-        # Use DeepSeek API directly for analysis
-        logger.info(f"Generating summaries for {len(batch)} emails using DeepSeek API")
-        response_text = get_deepseek_response(
-            messages=[
-                {"role": "system", "content": """You are an expert at summarizing maintenance and service-related emails. 
+        messages = [
+            {
+                "role": "system",
+                "content": """You are an expert at summarizing maintenance and service-related emails. 
                 For each email, provide ONE concise sentence focusing on the most critical issue or action needed.
                 Guidelines:
                 1. Start each summary with 'Email ID X:'
@@ -838,47 +759,38 @@ def summarize_emails_bulk(batch, model_name):
                 4. Include the type of issue (e.g., mechanical, electrical)
                 5. Mention severity if critical
                 6. Be specific but brief
-                7. Format: 'Email ID X: [Your one-sentence summary]'"""},
-                {"role": "user", "content": context}
-            ],
-            model_config=model_config,
-            model_name=model_name  # Pass model name directly
-        )
+                7. Format: 'Email ID X: [Your one-sentence summary]'"""
+            },
+            {
+                "role": "user",
+                "content": f"Summarize these maintenance/service emails in ONE sentence each, focusing on the most critical issue or action needed:\n\n" + 
+                          "\n\n".join([f"Email ID {id}:\nSubject: {subject}\nBody: {body}" for id, subject, body in batch])
+            }
+        ]
+
+        response = get_model_response(messages, 'small')
+        # Handle both string responses and object responses
+        if isinstance(response, str):
+            summaries_text = response.strip()
+        else:
+            summaries_text = response.choices[0].message.content.strip()
         
-        # Parse the response to extract summaries
+        # Parse summaries
         summaries = {}
-        response_text = response_text.strip()
-        
-        # Split response into individual email summaries
-        email_blocks = response_text.split('Email ID')
-        for block in email_blocks[1:]:  # Skip the first empty block
-            try:
-                id_str, summary = block.split(':', 1)
-                email_id = int(id_str.strip())
-                # Ensure summary is a single sentence and properly formatted
-                summary = summary.strip()
-                if not summary.endswith('.'):
-                    summary += '.'
-                summaries[email_id] = summary
-            except (ValueError, IndexError) as e:
-                logger.warning(f"Failed to parse summary for block: {block}, Error: {str(e)}")
-                continue
-        
-        # Fill in any missing summaries with better fallback summaries
-        for id, text_body, subject in batch:
-            if id not in summaries:
-                logger.warning(f"Using fallback summary for email {id}")
-                # Create a more informative fallback summary
-                summaries[id] = f"Critical issue: {subject[:100]} - Requires attention for {text_body[:100]}..."
+        for line in summaries_text.split('\n'):
+            if line.startswith('Email ID'):
+                try:
+                    parts = line.split(':', 1)
+                    email_id = int(parts[0].split()[-1])
+                    summary = parts[1].strip()
+                    summaries[email_id] = summary
+                except (ValueError, IndexError):
+                    continue
         
         return summaries
     except Exception as e:
         logger.error(f"Error in bulk summarization: {str(e)}")
-        # Return better fallback summaries
-        return {
-            id: f"Critical issue: {subject[:100]} - Requires attention for {text_body[:100]}..."
-            for id, text_body, subject in batch
-        }
+        return {}
 
 def select_model(query_type, query_text=None):
     """
@@ -920,11 +832,24 @@ def clean_html_to_text(html):
     # Re-join into clean text
     return "\n".join(filtered)
 
-def analyze_email_content(subject: str, body: str, model_name: str) -> Dict[str, Any]:
-    """Use LLM to analyze email content and extract incident type and severity"""
+def analyze_email_content(subject: str, body: str, model_name: str = None) -> Dict[str, Any]:
+    """Analyze email content using the configured model provider"""
     try:
-        # Prepare a more detailed prompt for the LLM
-        prompt = f"""Analyze this maintenance/service email and categorize it according to the incident type and severity.
+        messages = [
+            {
+                "role": "system",
+                "content": """You are an expert at analyzing maintenance and service-related emails. 
+                Your task is to accurately categorize incidents and assess their severity.
+                You MUST:
+                1. Follow the exact format specified
+                2. Choose the most appropriate category based on the actual content
+                3. Provide specific reasoning from the email
+                4. Be conservative in severity assessment - only mark as High if truly critical
+                5. Consider both immediate and potential impacts"""
+            },
+            {
+                "role": "user",
+                "content": f"""Analyze this maintenance/service email and categorize it according to the incident type and severity.
 
         Email Subject: {subject}
         Email Body: {body}
@@ -949,8 +874,8 @@ def analyze_email_content(subject: str, body: str, model_name: str) -> Dict[str,
           Examples: Regular maintenance requests, minor issues, general questions
 
         Please analyze and respond in EXACTLY this format:
-        INCIDENT_TYPE: [Choose ONE from: {', '.join(INCIDENT_CATEGORIES)}]
-        SEVERITY: [Choose ONE from: {', '.join(SEVERITY_LEVELS)}]
+        INCIDENT_TYPE: [Choose ONE from: Temperature, Pressure, Mechanical, Fluid Leak, Safety, Electrical, Others]
+        SEVERITY: [Choose ONE from: Low, Medium, High]
         REASONING: [Brief explanation for your classification, citing specific details from the email]
 
         Important:
@@ -959,90 +884,43 @@ def analyze_email_content(subject: str, body: str, model_name: str) -> Dict[str,
         3. Consider both subject and body content
         4. If multiple issues exist, choose the most critical one
         5. Use EXACTLY the format shown above"""
+            }
+        ]
 
-        # Use DeepSeek for analysis with lower temperature for more consistent results
-        model_config = select_model('complex_analysis')
-        model_config['temperature'] = 0.2  # Lower temperature for more consistent categorization
-        model_config['max_tokens'] = min(model_config['max_tokens'], 500)
-        
-        response = get_deepseek_response(
-            messages=[
-                {"role": "system", "content": """You are an expert at analyzing maintenance and service-related emails. 
-                Your task is to accurately categorize incidents and assess their severity.
-                You MUST:
-                1. Follow the exact format specified
-                2. Choose the most appropriate category based on the actual content
-                3. Provide specific reasoning from the email
-                4. Be conservative in severity assessment - only mark as High if truly critical
-                5. Consider both immediate and potential impacts"""},
-                {"role": "user", "content": prompt}
-            ],
-            model_config=model_config,
-            model_name=model_name
-        )
-
-        # Parse the structured response using regex
-        incident_type_match = re.search(r'INCIDENT_TYPE:\s*([A-Za-z\s]+)', response)
-        severity_match = re.search(r'SEVERITY:\s*([A-Za-z\s]+)', response)
-        reasoning_match = re.search(r'REASONING:\s*(.+?)(?=\n|$)', response, re.DOTALL)
-
-        if not all([incident_type_match, severity_match, reasoning_match]):
-            logger.error(f"Failed to parse LLM response: {response}")
-            # Try to extract any useful information even if format isn't perfect
-            incident_type = 'Others'
-            severity = 'Low'
-            reasoning = 'Failed to parse analysis'
-            
-            # Look for any mention of incident types in the response
-            for category in INCIDENT_CATEGORIES:
-                if category.lower() in response.lower():
-                    incident_type = category
-                    break
-            
-            # Look for any mention of severity levels
-            for level in SEVERITY_LEVELS:
-                if level.lower() in response.lower():
-                    severity = level
-                    break
+        response = get_model_response(messages, 'small')
+        # Handle both string responses and object responses
+        if isinstance(response, str):
+            analysis_text = response.strip()
         else:
-            incident_type = incident_type_match.group(1).strip()
-            severity = severity_match.group(1).strip()
-            reasoning = reasoning_match.group(1).strip()
-
-            # Validate the extracted values
-            if incident_type not in INCIDENT_CATEGORIES:
-                # Try to find the closest matching category
-                for category in INCIDENT_CATEGORIES:
-                    if category.lower() in incident_type.lower():
-                        incident_type = category
-                        break
-                else:
-                    incident_type = 'Others'
-            
-            if severity not in SEVERITY_LEVELS:
-                # Try to find the closest matching severity
-                for level in SEVERITY_LEVELS:
-                    if level.lower() in severity.lower():
-                        severity = level
-                        break
-                else:
-                    severity = 'Low'
-
-        logger.info(f"Email analysis - Type: {incident_type}, Severity: {severity}")
-        logger.info(f"Reasoning: {reasoning}")
-
-        return {
-            'incident_type': incident_type,
-            'severity': severity,
-            'reasoning': reasoning
+            analysis_text = response.choices[0].message.content.strip()
+        
+        # Parse the response
+        lines = analysis_text.split('\n')
+        analysis = {
+            'incident_type': 'Others',  # Default values
+            'severity': 'Low',
+            'reasoning': 'No specific analysis available'
         }
-
+        
+        for line in lines:
+            if line.startswith('INCIDENT_TYPE:'):
+                incident_type = line.split(':', 1)[1].strip()
+                if incident_type in INCIDENT_CATEGORIES:
+                    analysis['incident_type'] = incident_type
+            elif line.startswith('SEVERITY:'):
+                severity = line.split(':', 1)[1].strip()
+                if severity in SEVERITY_LEVELS:
+                    analysis['severity'] = severity
+            elif line.startswith('REASONING:'):
+                analysis['reasoning'] = line.split(':', 1)[1].strip()
+        
+        return analysis
     except Exception as e:
         logger.error(f"Error analyzing email content: {str(e)}")
         return {
             'incident_type': 'Others',
             'severity': 'Low',
-            'reasoning': f'Error in analysis: {str(e)}'
+            'reasoning': f'Error during analysis: {str(e)}'
         }
 
 def store_email(email_data):
@@ -1088,21 +966,45 @@ def store_email(email_data):
         # Store only the summary in OpenSearch
         try:
             current_time = datetime.now()
-            opensearch_client.index(
-                index=OPENSEARCH_INDEX_NAME,
-                body={
-                    'email_id': next_id,
-                    'subject': email['Subject'],  # Keep subject for reference
-                    'incident_type': analysis['incident_type'],
-                    'severity': analysis['severity'],
-                    'created_at': current_time.isoformat(),
-                    'created_at_timestamp': int(current_time.timestamp()),
-                    'is_analyzed': False,
-                    'summary': summary,
-                    'summary_vector': st.session_state.embedding_model.encode([summary]).tolist()
-                }
-            )
-            logger.info(f"Stored summary for email {next_id} in OpenSearch")
+            
+            # Generate embedding for the summary
+            try:
+                # Ensure the embedding is a numpy array of float32
+                embedding = st.session_state.embedding_model.encode(
+                    summary,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True
+                ).astype('float32')
+                
+                # Verify dimension matches the model output
+                expected_dim = 384  # all-MiniLM-L6-v2 dimension
+                if embedding.shape[0] != expected_dim:
+                    raise ValueError(f"Embedding dimension mismatch: got {embedding.shape[0]}, expected {expected_dim}")
+                
+                # Convert to list for OpenSearch
+                summary_vector = embedding.tolist()
+                
+                # Store in OpenSearch using the correct API
+                opensearch_client.index(
+                    index=OPENSEARCH_INDEX_NAME,
+                    body={  # Changed from 'document' to 'body'
+                        'email_id': next_id,
+                        'subject': email['Subject'],
+                        'incident_type': analysis['incident_type'],
+                        'severity': analysis['severity'],
+                        'created_at': current_time.isoformat(),
+                        'created_at_timestamp': int(current_time.timestamp()),
+                        'is_analyzed': False,
+                        'summary': summary,
+                        'summary_vector': summary_vector
+                    },
+                    refresh=True
+                )
+                logger.info(f"Stored summary for email {next_id} in OpenSearch")
+            except Exception as e:
+                logger.error(f"Error generating or storing embedding: {str(e)}")
+                raise
+                
         except Exception as e:
             logger.error(f"Error storing in OpenSearch: {str(e)}")
             # Continue even if OpenSearch storage fails - we still have the email in DuckDB
@@ -1370,8 +1272,7 @@ def process_batch(batch, batch_num, total_batches, model_name):
                 for id, subject, _, _, _, _, summary, summary_vector in batch:
                     opensearch_client.index(
                         index=OPENSEARCH_INDEX_NAME,
-                        id=id,
-                        body={
+                        body={  # Changed from 'document' to 'body'
                             'subject': subject,
                             'incident_type': analysis['incident_type'],
                             'severity': analysis['severity'],
@@ -1380,7 +1281,8 @@ def process_batch(batch, batch_num, total_batches, model_name):
                             'is_analyzed': True,
                             'summary': summary,
                             'summary_vector': summary_vector
-                        }
+                        },
+                        refresh=True
                     )
                 thread_logger.info(f"Updated OpenSearch metadata for batch {batch_num}")
             except Exception as e:
@@ -2486,8 +2388,7 @@ def update_email_embeddings(email_ids=None):
                     for id, subject, summary, inc_type, sev in metadatas:
                         opensearch_client.index(
                             index=OPENSEARCH_INDEX_NAME,
-                            id=id,
-                            body={
+                            body={  # Changed from 'document' to 'body'
                                 'subject': subject,
                                 'incident_type': inc_type,
                                 'severity': sev,
@@ -2496,7 +2397,8 @@ def update_email_embeddings(email_ids=None):
                                 'is_analyzed': is_analyzed,
                                 'summary': summary,
                                 'summary_vector': st.session_state.embedding_model.encode([summary]).tolist()
-                            }
+                            },
+                            refresh=True
                         )
                     success_count += len(batch)
                     logger.info(f"Updated embeddings for batch of {len(batch)} emails")
@@ -2551,12 +2453,32 @@ def get_vector_store_stats():
         logger.error(f"Error getting vector store stats: {str(e)}")
         return None
 
+def recreate_opensearch_index():
+    """Recreate the OpenSearch index with correct settings"""
+    try:
+        # Delete existing index if it exists
+        if st.session_state.opensearch_client.indices.exists(index=OPENSEARCH_INDEX_NAME):
+            logger.info(f"Deleting existing index: {OPENSEARCH_INDEX_NAME}")
+            st.session_state.opensearch_client.indices.delete(index=OPENSEARCH_INDEX_NAME)
+        
+        # Create new index with correct settings
+        logger.info("Creating new index with updated settings")
+        st.session_state.opensearch_client.indices.create(
+            index=OPENSEARCH_INDEX_NAME,
+            body=OPENSEARCH_INDEX_SETTINGS
+        )
+        logger.info("Successfully recreated OpenSearch index")
+        return True
+    except Exception as e:
+        logger.error(f"Error recreating OpenSearch index: {str(e)}")
+        return False
+
 # Add these functions to the UI section
 def add_vector_store_management():
     """Add vector store management controls to the UI"""
     st.markdown("### Vector Store Management")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         if st.button('🔄 Update All Embeddings', type='secondary'):
@@ -2575,6 +2497,17 @@ def add_vector_store_management():
                     st.rerun()
                 else:
                     st.error('❌ Failed to clear vector store')
+            else:
+                st.warning('Please confirm that you understand this action cannot be undone')
+    
+    with col3:
+        if st.button('🔄 Recreate Index', type='secondary'):
+            if st.checkbox('I understand this will recreate the index with correct settings'):
+                if recreate_opensearch_index():
+                    st.success('✅ Index recreated successfully!')
+                    st.rerun()
+                else:
+                    st.error('❌ Failed to recreate index')
             else:
                 st.warning('Please confirm that you understand this action cannot be undone')
     
@@ -2829,6 +2762,76 @@ def get_severity_details(severity):
     except Exception as e:
         logger.error(f"Error getting severity details: {str(e)}")
         return []
+
+# Add after the model configurations and before the analysis functions
+def get_model_response(messages, model_size='small'):
+    """Get response from the configured model provider with fallback"""
+    try:
+        # For summarization, use Anthropic
+        model_config = ANALYSIS_MODEL_CONFIG[model_size]['anthropic'].copy()  # Make a copy to avoid modifying the original
+        # Ensure max_tokens is set and within limits
+        if 'max_tokens' not in model_config or not isinstance(model_config['max_tokens'], int):
+            model_config['max_tokens'] = 1024 if model_size == 'small' else 2048  # Conservative defaults
+        # Cap max_tokens to ensure we don't exceed limits
+        model_config['max_tokens'] = min(model_config['max_tokens'], 2048)  # Hard cap at 2048
+        logger.info(f"Using Anthropic model for {model_size} task with max_tokens={model_config['max_tokens']}")
+        try:
+            return get_anthropic_response(messages, model_config)
+        except Exception as primary_error:
+            logger.error(f"Anthropic model failed: {str(primary_error)}")
+            # Fallback to DeepSeek or Groq as before
+            fallback_provider = 'deepseek' if MODEL_PROVIDER == 'groq' else 'groq'
+            try:
+                fallback_config = ANALYSIS_MODEL_CONFIG[model_size][fallback_provider].copy()  # Make a copy
+                # Ensure fallback config also has conservative token limits
+                fallback_config['max_tokens'] = min(fallback_config['max_tokens'], 2048)
+                if fallback_provider == 'groq':
+                    return get_groq_response(messages, fallback_config)
+                else:
+                    return get_deepseek_response(messages, fallback_config, fallback_config['name'])
+            except Exception as fallback_error:
+                raise Exception(f"Both Anthropic and {fallback_provider} failed. Last error: {str(fallback_error)}")
+    except Exception as e:
+        logger.error(f"Error in get_model_response: {str(e)}")
+        raise
+
+def get_anthropic_response(messages, model_config):
+    """Get response from Anthropic Claude API"""
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        # Convert OpenAI-style messages to Anthropic format
+        system_prompt = ""
+        user_content = ""
+        for msg in messages:
+            if msg['role'] == 'system':
+                system_prompt = msg['content']
+            elif msg['role'] == 'user':
+                user_content += msg['content'] + '\n'
+        
+        response = client.messages.create(
+            model=model_config['name'],
+            max_tokens=model_config['max_tokens'],
+            temperature=model_config.get('temperature', 0.2),
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_content}]
+        )
+        
+        # Handle the response based on its type
+        if hasattr(response, 'content'):
+            # For newer Anthropic API versions
+            if isinstance(response.content, list):
+                # Extract text from the first content block
+                for block in response.content:
+                    if block.type == 'text':
+                        return block.text
+                return ''  # Return empty string if no text block found
+            # For older API versions or direct text content
+            return str(response.content)
+        # Fallback to string representation if content attribute not found
+        return str(response)
+    except Exception as e:
+        logger.error(f"Error calling Anthropic API: {str(e)}")
+        raise
 
 # Streamlit UI
 st.title('📧 Email Analysis Dashboard')
