@@ -134,9 +134,8 @@ import re
 from bs4 import BeautifulSoup
 import html2text
 from typing import Dict, Any
-import chromadb
-from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+from opensearchpy import OpenSearch, helpers
+from sentence_transformers import SentenceTransformer
 import numpy as np
 import plotly.express as px
 import pandas as pd
@@ -238,9 +237,91 @@ INCIDENT_CATEGORIES = [
 
 SEVERITY_LEVELS = ["Low", "Medium", "High"]
 
-# ChromaDB configuration
-CHROMA_PERSIST_DIR = "chroma_db"
-CHROMA_COLLECTION_NAME = "email_summaries"
+# OpenSearch configuration
+OPENSEARCH_HOST = os.getenv('OPENSEARCH_HOST', 'localhost')
+OPENSEARCH_PORT = int(os.getenv('OPENSEARCH_PORT', '9200'))
+OPENSEARCH_USERNAME = os.getenv('OPENSEARCH_USERNAME', 'admin')
+OPENSEARCH_PASSWORD = os.getenv('OPENSEARCH_PASSWORD', 'admin')
+OPENSEARCH_INDEX_NAME = "email_summaries"
+OPENSEARCH_INDEX_SETTINGS = {
+    "settings": {
+        "index": {
+            "number_of_shards": 1,
+            "number_of_replicas": 0
+        }
+    },
+    "mappings": {
+        "properties": {
+            "email_id": {"type": "long"},
+            "subject": {"type": "text"},
+            "summary": {"type": "text"},
+            "summary_vector": {
+                "type": "knn_vector",
+                "dimension": 768,  # Dimension for sentence-transformers
+                "method": {
+                    "name": "hnsw",
+                    "space_type": "l2",
+                    "engine": "nmslib",
+                    "parameters": {
+                        "ef_search": 100,
+                        "ef_construction": 200,
+                        "m": 16
+                    }
+                }
+            },
+            "incident_type": {"type": "keyword"},
+            "severity": {"type": "keyword"},
+            "created_at": {"type": "date"},
+            "created_at_timestamp": {"type": "long"},
+            "is_analyzed": {"type": "boolean"}
+        }
+    }
+}
+
+# Initialize sentence transformer model for embeddings
+if 'embedding_model' not in st.session_state:
+    try:
+        st.session_state.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("Initialized sentence transformer model for embeddings")
+    except Exception as e:
+        logger.error(f"Error initializing embedding model: {str(e)}")
+        st.error("Failed to initialize embedding model. Please check the logs for details.")
+        st.stop()
+
+# Initialize OpenSearch client
+if 'opensearch_client' not in st.session_state:
+    try:
+        st.session_state.opensearch_client = OpenSearch(
+            hosts=[{'host': OPENSEARCH_HOST, 'port': OPENSEARCH_PORT}],
+            http_auth=(OPENSEARCH_USERNAME, OPENSEARCH_PASSWORD),
+            use_ssl=True,
+            verify_certs=False,
+            ssl_show_warn=False
+        )
+        
+        # Create index if it doesn't exist
+        if not st.session_state.opensearch_client.indices.exists(index=OPENSEARCH_INDEX_NAME):
+            st.session_state.opensearch_client.indices.create(
+                index=OPENSEARCH_INDEX_NAME,
+                body=OPENSEARCH_INDEX_SETTINGS
+            )
+            logger.info(f"Created OpenSearch index: {OPENSEARCH_INDEX_NAME}")
+        else:
+            logger.info(f"Using existing OpenSearch index: {OPENSEARCH_INDEX_NAME}")
+        
+        logger.info("OpenSearch client initialized successfully")
+    except Exception as e:
+        logger.error(f"Error initializing OpenSearch client: {str(e)}")
+        st.error("Failed to initialize OpenSearch client. Please check the logs for details.")
+        st.stop()
+
+# Get OpenSearch client from session state
+try:
+    opensearch_client = st.session_state.opensearch_client
+except Exception as e:
+    logger.error(f"Error accessing OpenSearch client: {str(e)}")
+    st.error("Failed to access OpenSearch client. Please check the logs for details.")
+    st.stop()
 
 # Initialize database connection only once
 if 'db_initialized' not in st.session_state:
@@ -315,50 +396,6 @@ if 'db_initialized' not in st.session_state:
         logger.error(f"Error initializing database: {str(e)}")
         st.error("Failed to initialize database. Please check the logs for details.")
         st.stop()
-
-# Initialize ChromaDB client
-if 'chroma_client' not in st.session_state:
-    try:
-        # Create persistent client without deleting existing collection
-        st.session_state.chroma_client = chromadb.PersistentClient(
-            path=CHROMA_PERSIST_DIR,
-            settings=Settings(
-                anonymized_telemetry=False,
-                allow_reset=False  # Changed to False to prevent automatic reset
-            )
-        )
-        
-        # Use ChromaDB's default embedding function
-        embedding_function = embedding_functions.DefaultEmbeddingFunction()
-        
-        # Try to get existing collection or create new one
-        try:
-            st.session_state.email_collection = st.session_state.chroma_client.get_collection(
-                name=CHROMA_COLLECTION_NAME,
-                embedding_function=embedding_function
-            )
-            logger.info(f"Retrieved existing ChromaDB collection: {CHROMA_COLLECTION_NAME}")
-        except Exception as e:
-            logger.info(f"Creating new ChromaDB collection: {CHROMA_COLLECTION_NAME}")
-            st.session_state.email_collection = st.session_state.chroma_client.create_collection(
-                name=CHROMA_COLLECTION_NAME,
-                embedding_function=embedding_function,
-                metadata={"description": "Email summaries and analysis results"}
-            )
-        
-        logger.info("ChromaDB client and collection initialized successfully")
-    except Exception as e:
-        logger.error(f"Error initializing ChromaDB: {str(e)}")
-        st.error("Failed to initialize vector database. Please check the logs for details.")
-        st.stop()
-
-# Get collection from session state
-try:
-    email_collection = st.session_state.email_collection
-except Exception as e:
-    logger.error(f"Error accessing ChromaDB collection: {str(e)}")
-    st.error("Failed to access vector database. Please check the logs for details.")
-    st.stop()
 
 def init_database():
     """Initialize the database and create tables if they don't exist"""
@@ -1009,7 +1046,7 @@ def analyze_email_content(subject: str, body: str, model_name: str) -> Dict[str,
         }
 
 def store_email(email_data):
-    """Store email in DuckDB and only its summary in ChromaDB"""
+    """Store email in DuckDB and only its summary in OpenSearch"""
     try:
         email = email_data['Email']
         # Extract HTML and convert to clean text
@@ -1048,26 +1085,27 @@ def store_email(email_data):
             summary  # Store summary in DuckDB as well
         ))
         
-        # Store only the summary in ChromaDB
+        # Store only the summary in OpenSearch
         try:
             current_time = datetime.now()
-            email_collection.add(
-                documents=[summary],  # Only store the summary
-                metadatas=[{
+            opensearch_client.index(
+                index=OPENSEARCH_INDEX_NAME,
+                body={
                     'email_id': next_id,
                     'subject': email['Subject'],  # Keep subject for reference
                     'incident_type': analysis['incident_type'],
                     'severity': analysis['severity'],
                     'created_at': current_time.isoformat(),
                     'created_at_timestamp': int(current_time.timestamp()),
-                    'is_analyzed': False
-                }],
-                ids=[str(next_id)]
+                    'is_analyzed': False,
+                    'summary': summary,
+                    'summary_vector': st.session_state.embedding_model.encode([summary]).tolist()
+                }
             )
-            logger.info(f"Stored summary for email {next_id} in ChromaDB with embedding")
+            logger.info(f"Stored summary for email {next_id} in OpenSearch")
         except Exception as e:
-            logger.error(f"Error storing in ChromaDB: {str(e)}")
-            # Continue even if ChromaDB storage fails - we still have the email in DuckDB
+            logger.error(f"Error storing in OpenSearch: {str(e)}")
+            # Continue even if OpenSearch storage fails - we still have the email in DuckDB
         
         logger.info(f"Stored email {next_id} in DuckDB")
         logger.info(f"Analysis: Type={analysis['incident_type']}, Severity={analysis['severity']}")
@@ -1305,27 +1343,49 @@ def process_batch(batch, batch_num, total_batches, model_name):
             thread_conn.execute("COMMIT")
             thread_logger.info(f"Successfully processed batch {batch_num}")
             
-            # Update ChromaDB metadata for these emails
+            # Update OpenSearch metadata for these emails
             try:
                 # Get current metadata for these emails
-                results = email_collection.get(
-                    ids=[str(id) for id, _, _ in batch],
-                    include=["metadatas"]
+                results = opensearch_client.search(
+                    index=OPENSEARCH_INDEX_NAME,
+                    body={
+                        "query": {
+                            "bool": {
+                                "filter": {
+                                    "terms": {
+                                        "email_id": [id for id, _, _ in batch]
+                                    }
+                                }
+                            }
+                        },
+                        "fields": ["subject", "incident_type", "severity", "created_at", "created_at_timestamp", "is_analyzed", "summary", "summary_vector"]
+                    }
                 )
                 
                 # Update metadata with is_analyzed=True
-                for metadata in results['metadatas']:
-                    metadata['is_analyzed'] = True
+                for hit in results['hits']['hits']:
+                    hit['_source']['is_analyzed'] = True
                 
-                # Update ChromaDB
-                email_collection.update(
-                    ids=[str(id) for id, _, _ in batch],
-                    metadatas=results['metadatas']
-                )
-                thread_logger.info(f"Updated ChromaDB metadata for batch {batch_num}")
+                # Update OpenSearch
+                for id, subject, _, _, _, _, summary, summary_vector in batch:
+                    opensearch_client.index(
+                        index=OPENSEARCH_INDEX_NAME,
+                        id=id,
+                        body={
+                            'subject': subject,
+                            'incident_type': analysis['incident_type'],
+                            'severity': analysis['severity'],
+                            'created_at': datetime.now().isoformat(),
+                            'created_at_timestamp': int(datetime.now().timestamp()),
+                            'is_analyzed': True,
+                            'summary': summary,
+                            'summary_vector': summary_vector
+                        }
+                    )
+                thread_logger.info(f"Updated OpenSearch metadata for batch {batch_num}")
             except Exception as e:
-                thread_logger.error(f"Error updating ChromaDB metadata: {str(e)}")
-                # Don't fail the whole batch if ChromaDB update fails
+                thread_logger.error(f"Error updating OpenSearch metadata: {str(e)}")
+                # Don't fail the whole batch if OpenSearch update fails
 
             return section_map
             
@@ -1521,21 +1581,32 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                 relevant_categories = determine_relevant_categories(query_text)
                 logger.info(f"Relevant categories for query: {relevant_categories}")
                 
-                # Query ChromaDB for similar summaries
-                logger.info("Querying ChromaDB for similar summaries...")
-                results = email_collection.query(
-                    query_texts=[query_text],
-                    n_results=limit * 2,  # Get more results than needed for filtering
-                    where={"created_at_timestamp": {"$gte": date_threshold_timestamp}},
-                    include=["documents", "metadatas", "distances"]
+                # Query OpenSearch for similar summaries
+                logger.info("Querying OpenSearch for similar summaries...")
+                results = opensearch_client.search(
+                    index=OPENSEARCH_INDEX_NAME,
+                    body={
+                        "query": {
+                            "bool": {
+                                "filter": {
+                                    "terms": {
+                                        "incident_type": relevant_categories,
+                                        "severity": relevant_categories
+                                    }
+                                }
+                            }
+                        },
+                        "fields": ["subject", "incident_type", "severity", "created_at", "created_at_timestamp", "is_analyzed", "summary", "summary_vector"],
+                        "size": limit * 2  # Get more results than needed for filtering
+                    }
                 )
                 
-                if not results['documents'] or not results['documents'][0]:
+                if not results['hits']['hits']:
                     logger.warning("No results from vector search, falling back to text search")
                     return get_fallback_context(recent_emails, query_text, limit, days_back)
                 
-                # Get email IDs from ChromaDB results
-                email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+                # Get email IDs from OpenSearch results
+                email_ids = [int(hit['_source']['email_id']) for hit in results['hits']['hits']]
                 
                 # If we have 1-2 specific categories, filter the results
                 if 1 <= len(relevant_categories) <= 2:
@@ -1560,15 +1631,12 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                     logger.info(f"Found {len(category_filtered_ids)} emails matching specific categories")
                     
                     if category_filtered_ids:
-                        # Filter ChromaDB results to only include category-matched emails
-                        filtered_indices = [i for i, metadata in enumerate(results['metadatas'][0]) 
-                                         if int(metadata['email_id']) in category_filtered_ids]
+                        # Filter OpenSearch results to only include category-matched emails
+                        filtered_indices = [i for i, hit in enumerate(results['hits']['hits']) if int(hit['_source']['email_id']) in category_filtered_ids]
                         
                         if filtered_indices:
                             # Update results with filtered data
-                            results['documents'][0] = [results['documents'][0][i] for i in filtered_indices]
-                            results['metadatas'][0] = [results['metadatas'][0][i] for i in filtered_indices]
-                            results['distances'][0] = [results['distances'][0][i] for i in filtered_indices]
+                            results['hits']['hits'] = [results['hits']['hits'][i] for i in filtered_indices]
                             logger.info(f"Filtered to {len(filtered_indices)} category-specific results")
                         else:
                             logger.info("No category-specific results found, using all results")
@@ -1578,7 +1646,7 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                     logger.info("Using all results (no specific category filtering)")
                 
                 # Get full email details from DuckDB
-                email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+                email_ids = [int(hit['_source']['email_id']) for hit in results['hits']['hits']]
                 logger.info(f"Retrieving full details for {len(email_ids)} emails from DuckDB")
                 
                 # Get full email details
@@ -1595,8 +1663,8 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                 total_chars = 0
                 used_emails = set()
                 
-                for doc, metadata, distance in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
-                    email_id = int(metadata['email_id'])
+                for hit in results['hits']['hits']:
+                    email_id = int(hit['_source']['email_id'])
                     if email_id in used_emails or total_chars >= MAX_CONTEXT_SIZE:
                         continue
                     
@@ -1623,8 +1691,8 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                             if 'systemic_trends' in relevant_categories and st:
                                 category_summary += f"\nSystemic Trends: {st}"
                         
-                        email_content = f"""Email {id} (Similarity: {1 - distance:.2f}):
-{doc}{category_summary}
+                        email_content = f"""Email {id} (Similarity: {1 - hit['_score']:.2f}):
+{hit['_source']['summary']}{category_summary}
 Body Preview: {body[:200]}..."""
                         
                         email_size = len(email_content)
@@ -1667,18 +1735,30 @@ Body Preview: {body[:200]}..."""
             
             logger.info(f"Retrieved {len(emails)} recent emails from DuckDB")
             
-            # Get summaries from ChromaDB for these emails
+            # Get summaries from OpenSearch for these emails
             try:
-                logger.info("Retrieving summaries from ChromaDB")
-                summaries = email_collection.get(
-                    ids=[str(id) for id, _, _, _, _ in emails],
-                    include=["documents", "metadatas"]
+                logger.info("Retrieving summaries from OpenSearch")
+                summaries = opensearch_client.search(
+                    index=OPENSEARCH_INDEX_NAME,
+                    body={
+                        "query": {
+                            "bool": {
+                                "filter": {
+                                    "terms": {
+                                        "email_id": [id for id, _, _ in emails]
+                                    }
+                                }
+                            }
+                        },
+                        "fields": ["subject", "incident_type", "severity", "created_at", "created_at_timestamp", "is_analyzed", "summary", "summary_vector"],
+                        "size": len(emails)
+                    }
                 )
-                summary_map = {int(metadata['email_id']): doc 
-                             for doc, metadata in zip(summaries['documents'], summaries['metadatas'])}
-                logger.info(f"Retrieved {len(summary_map)} summaries from ChromaDB")
+                summary_map = {int(hit['_source']['email_id']): hit['_source']['summary'] 
+                             for hit in summaries['hits']['hits']}
+                logger.info(f"Retrieved {len(summary_map)} summaries from OpenSearch")
             except Exception as e:
-                logger.error(f"Error getting summaries from ChromaDB: {str(e)}")
+                logger.error(f"Error getting summaries from OpenSearch: {str(e)}")
                 summary_map = {}
             
             # Generate context with summaries
@@ -1849,21 +1929,32 @@ def store_analysis_results(email_id, procedural_deviations, recurrence_indicator
         return False
 
 def get_similar_emails(query_text, limit=5):
-    """Get similar emails using ChromaDB vector similarity search"""
+    """Get similar emails using OpenSearch vector similarity search"""
     try:
-        # Query ChromaDB for similar documents
-        results = email_collection.query(
-            query_texts=[query_text],
-            n_results=limit,
-            include=["documents", "metadatas", "distances"]
+        # Query OpenSearch for similar documents
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": {
+                            "knn": {
+                                "field": "summary_vector",
+                                "vector": st.session_state.embedding_model.encode([query_text]).tolist(),
+                                "k": limit
+                            }
+                        }
+                    }
+                }
+            }
         )
         
-        if not results['documents'] or not results['documents'][0]:
+        if not results['hits']['hits']:
             return []
         
         # Get additional details from DuckDB
         conn = get_db_connection()
-        email_ids = [int(metadata['email_id']) for metadata in results['metadatas'][0]]
+        email_ids = [int(hit['_source']['email_id']) for hit in results['hits']['hits']]
         
         # Get full email details
         email_details = conn.execute('''
@@ -1874,13 +1965,13 @@ def get_similar_emails(query_text, limit=5):
         
         # Create results list with similarity scores
         results_list = []
-        for doc, metadata, distance in zip(results['documents'][0], results['metadatas'][0], results['distances'][0]):
-            email_id = int(metadata['email_id'])
+        for hit in results['hits']['hits']:
+            email_id = int(hit['_source']['email_id'])
             # Find matching email details
             email_detail = next((e for e in email_details if e[0] == email_id), None)
             if email_detail:
                 _, subject, text = email_detail
-                results_list.append((email_id, subject, text, 1 - distance))  # Convert distance to similarity
+                results_list.append((email_id, subject, text, 1 - hit['_score']))  # Convert similarity to distance
         
         return results_list
     except Exception as e:
@@ -2127,12 +2218,23 @@ def add_recategorize_button():
                 st.info('No emails needed recategorization')
 
 def get_total_analyzed_emails():
-    """Get the total number of analyzed emails from ChromaDB"""
+    """Get the total number of analyzed emails from OpenSearch"""
     try:
-        results = email_collection.get(
-            where={"analyzed": True}
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": {
+                            "term": {
+                                "is_analyzed": True
+                            }
+                        }
+                    }
+                }
+            }
         )
-        return len(results['ids'])
+        return results['hits']['total']['value']
     except Exception as e:
         logger.error(f"Error getting total analyzed emails: {str(e)}")
         return 0
@@ -2177,7 +2279,7 @@ def determine_relevant_categories(query_text):
 def clear_emails_table():
     """Clear all emails from the database and vector store"""
     try:
-        # First clear the ChromaDB collection to release any file handles
+        # First clear the OpenSearch index to release any file handles
         clear_vector_store()
         
         # Get current connection
@@ -2336,7 +2438,7 @@ def update_email_embeddings(email_ids=None):
                 if not summaries:
                     raise Exception("Failed to generate summaries after all retries")
                 
-                # Prepare metadata for ChromaDB
+                # Prepare metadata for OpenSearch
                 metadatas = []
                 documents = []
                 ids = []
@@ -2362,24 +2464,45 @@ def update_email_embeddings(email_ids=None):
                     documents.append(summary)
                     ids.append(str(id))
                 
-                # Update ChromaDB
+                # Update OpenSearch
                 try:
                     # Delete existing entries
-                    email_collection.delete(
-                        ids=ids
+                    opensearch_client.delete_by_query(
+                        index=OPENSEARCH_INDEX_NAME,
+                        body={
+                            "query": {
+                                "bool": {
+                                    "filter": {
+                                        "terms": {
+                                            "email_id": ids
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     )
                     
                     # Add updated entries
-                    email_collection.add(
-                        documents=documents,
-                        metadatas=metadatas,
-                        ids=ids
-                    )
+                    for id, subject, summary, inc_type, sev in metadatas:
+                        opensearch_client.index(
+                            index=OPENSEARCH_INDEX_NAME,
+                            id=id,
+                            body={
+                                'subject': subject,
+                                'incident_type': inc_type,
+                                'severity': sev,
+                                'created_at': created_at,
+                                'created_at_timestamp': created_at_timestamp,
+                                'is_analyzed': is_analyzed,
+                                'summary': summary,
+                                'summary_vector': st.session_state.embedding_model.encode([summary]).tolist()
+                            }
+                        )
                     success_count += len(batch)
                     logger.info(f"Updated embeddings for batch of {len(batch)} emails")
                 except Exception as e:
                     error_count += len(batch)
-                    logger.error(f"Error updating ChromaDB for batch: {str(e)}")
+                    logger.error(f"Error updating OpenSearch for batch: {str(e)}")
                 
                 # Small delay between batches to avoid rate limits
                 time.sleep(0.5)
@@ -2401,29 +2524,28 @@ def update_email_embeddings(email_ids=None):
         return 0, 0
 
 def clear_vector_store():
-    """Clear the ChromaDB collection more efficiently"""
+    """Clear the OpenSearch index more efficiently"""
     try:
-        # Delete and recreate collection in one operation
-        st.session_state.chroma_client.delete_collection(CHROMA_COLLECTION_NAME)
-        st.session_state.email_collection = st.session_state.chroma_client.create_collection(
-            name=CHROMA_COLLECTION_NAME,
-            embedding_function=embedding_functions.DefaultEmbeddingFunction(),
-            metadata={"description": "Email summaries and analysis results"}
+        # Delete and recreate index in one operation
+        opensearch_client.indices.delete(index=OPENSEARCH_INDEX_NAME)
+        opensearch_client.indices.create(
+            index=OPENSEARCH_INDEX_NAME,
+            body=OPENSEARCH_INDEX_SETTINGS
         )
-        logger.info("ChromaDB collection cleared and recreated")
+        logger.info("OpenSearch index cleared and recreated")
         return True
     except Exception as e:
         logger.error(f"Error clearing vector store: {str(e)}")
         return False
 
 def get_vector_store_stats():
-    """Get statistics about the ChromaDB collection"""
+    """Get statistics about the OpenSearch index"""
     try:
-        count = email_collection.count()
+        count = opensearch_client.count(index=OPENSEARCH_INDEX_NAME)
         return {
             'total_documents': count,
-            'collection_name': CHROMA_COLLECTION_NAME,
-            'embedding_function': 'DefaultEmbeddingFunction'
+            'collection_name': OPENSEARCH_INDEX_NAME,
+            'embedding_function': 'SentenceTransformer'
         }
     except Exception as e:
         logger.error(f"Error getting vector store stats: {str(e)}")
@@ -2466,6 +2588,248 @@ def add_vector_store_management():
         - Embedding Function: {stats['embedding_function']}
         """)
 
+def get_incident_type_distribution():
+    """Get distribution of incident types from OpenSearch"""
+    try:
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "size": 0,
+                "aggs": {
+                    "incident_types": {
+                        "terms": {
+                            "field": "incident_type",
+                            "size": 10
+                        }
+                    }
+                }
+            }
+        )
+        
+        buckets = results['aggregations']['incident_types']['buckets']
+        return {bucket['key']: bucket['doc_count'] for bucket in buckets}
+    except Exception as e:
+        logger.error(f"Error getting incident type distribution: {str(e)}")
+        return {}
+
+def get_severity_distribution():
+    """Get distribution of severity levels from OpenSearch"""
+    try:
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "size": 0,
+                "aggs": {
+                    "severity_levels": {
+                        "terms": {
+                            "field": "severity",
+                            "size": 10
+                        }
+                    }
+                }
+            }
+        )
+        
+        buckets = results['aggregations']['severity_levels']['buckets']
+        return {bucket['key']: bucket['doc_count'] for bucket in buckets}
+    except Exception as e:
+        logger.error(f"Error getting severity distribution: {str(e)}")
+        return {}
+
+def get_trends_over_time():
+    """Get trends of incidents over time from OpenSearch"""
+    try:
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "size": 0,
+                "aggs": {
+                    "trends_over_time": {
+                        "date_histogram": {
+                            "field": "created_at",
+                            "calendar_interval": "day"
+                        },
+                        "aggs": {
+                            "incident_types": {
+                                "terms": {
+                                    "field": "incident_type",
+                                    "size": 10
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        
+        buckets = results['aggregations']['trends_over_time']['buckets']
+        return buckets
+    except Exception as e:
+        logger.error(f"Error getting trends over time: {str(e)}")
+        return []
+
+def get_incident_correlations():
+    """Get correlations between incident types and severity levels from OpenSearch"""
+    try:
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "size": 0,
+                "aggs": {
+                    "incident_types": {
+                        "terms": {
+                            "field": "incident_type",
+                            "size": 10
+                        },
+                        "aggs": {
+                            "severity_distribution": {
+                                "terms": {
+                                    "field": "severity",
+                                    "size": 10
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+        
+        buckets = results['aggregations']['incident_types']['buckets']
+        correlations = {}
+        for bucket in buckets:
+            incident_type = bucket['key']
+            severity_dist = {
+                sub_bucket['key']: sub_bucket['doc_count']
+                for sub_bucket in bucket['severity_distribution']['buckets']
+            }
+            correlations[incident_type] = severity_dist
+        return correlations
+    except Exception as e:
+        logger.error(f"Error getting incident correlations: {str(e)}")
+        return {}
+
+def get_systemic_trends():
+    """Get systemic trends from OpenSearch"""
+    try:
+        # Get all analyzed emails
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": {
+                            "term": {
+                                "is_analyzed": True
+                            }
+                        }
+                    }
+                },
+                "size": 1000  # Adjust based on your needs
+            }
+        )
+        
+        # Process results to identify trends
+        trends = {}
+        for hit in results['hits']['hits']:
+            incident_type = hit['_source']['incident_type']
+            severity = hit['_source']['severity']
+            
+            if incident_type not in trends:
+                trends[incident_type] = {
+                    'count': 0,
+                    'severity_counts': {},
+                    'recent_count': 0
+                }
+            
+            trends[incident_type]['count'] += 1
+            trends[incident_type]['severity_counts'][severity] = trends[incident_type]['severity_counts'].get(severity, 0) + 1
+            
+            # Check if this is a recent incident (last 7 days)
+            created_at = datetime.fromisoformat(hit['_source']['created_at'])
+            if (datetime.now() - created_at).days <= 7:
+                trends[incident_type]['recent_count'] += 1
+        
+        return trends
+    except Exception as e:
+        logger.error(f"Error getting systemic trends: {str(e)}")
+        return {}
+
+def get_incident_details(incident_type):
+    """Get detailed information about a specific incident type from OpenSearch"""
+    try:
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": {
+                            "term": {
+                                "incident_type": incident_type
+                            }
+                        }
+                    }
+                },
+                "size": 100,  # Adjust based on your needs
+                "sort": [
+                    {"created_at": {"order": "desc"}}
+                ]
+            }
+        )
+        
+        incidents = []
+        for hit in results['hits']['hits']:
+            source = hit['_source']
+            incidents.append({
+                'email_id': source['email_id'],
+                'subject': source['subject'],
+                'severity': source['severity'],
+                'created_at': source['created_at'],
+                'summary': source['summary']
+            })
+        
+        return incidents
+    except Exception as e:
+        logger.error(f"Error getting incident details: {str(e)}")
+        return []
+
+def get_severity_details(severity):
+    """Get detailed information about a specific severity level from OpenSearch"""
+    try:
+        results = opensearch_client.search(
+            index=OPENSEARCH_INDEX_NAME,
+            body={
+                "query": {
+                    "bool": {
+                        "filter": {
+                            "term": {
+                                "severity": severity
+                            }
+                        }
+                    }
+                },
+                "size": 100,  # Adjust based on your needs
+                "sort": [
+                    {"created_at": {"order": "desc"}}
+                ]
+            }
+        )
+        
+        incidents = []
+        for hit in results['hits']['hits']:
+            source = hit['_source']
+            incidents.append({
+                'email_id': source['email_id'],
+                'subject': source['subject'],
+                'incident_type': source['incident_type'],
+                'created_at': source['created_at'],
+                'summary': source['summary']
+            })
+        
+        return incidents
+    except Exception as e:
+        logger.error(f"Error getting severity details: {str(e)}")
+        return []
+
 # Streamlit UI
 st.title('📧 Email Analysis Dashboard')
 
@@ -2479,321 +2843,158 @@ with tab1:
 with tab2:
     st.header("📈 Email Analytics Dashboard")
     
-    # Load email data from ChromaDB and DuckDB
+    # Load email data from OpenSearch
     try:
-        # Get data from both sources for comprehensive analysis
-        collection = st.session_state.chroma_client.get_collection("email_summaries")
-        results = collection.get(include=["metadatas", "documents"])
+        # Get incident type distribution
+        incident_dist = get_incident_type_distribution()
+        if incident_dist:
+            st.subheader("Incident Type Distribution")
+            fig = px.pie(
+                values=list(incident_dist.values()),
+                names=list(incident_dist.keys()),
+                title="Distribution of Incident Types"
+            )
+            st.plotly_chart(fig)
         
-        # Get additional data from DuckDB for more detailed analysis
-        conn = get_db_connection()
-        detailed_data = conn.execute('''
-            SELECT 
-                e.id,
-                e.email_subject,
-                e.email_text_body,
-                e.incident_type,
-                e.severity,
-                e.created_at,
-                e.is_analyzed,
-                e.analyzed_at,
-                ea.procedural_deviations,
-                ea.recurrence_indicators,
-                ea.systemic_trends
-            FROM emails e
-            LEFT JOIN email_analysis ea ON e.id = ea.email_id
-            ORDER BY e.created_at DESC
-        ''').fetchdf()
+        # Get severity distribution
+        severity_dist = get_severity_distribution()
+        if severity_dist:
+            st.subheader("Severity Level Distribution")
+            fig = px.bar(
+                x=list(severity_dist.keys()),
+                y=list(severity_dist.values()),
+                title="Distribution of Severity Levels",
+                labels={'x': 'Severity Level', 'y': 'Count'}
+            )
+            st.plotly_chart(fig)
         
-        if not detailed_data.empty:
-            # Convert timestamp columns
-            detailed_data['created_at'] = pd.to_datetime(detailed_data['created_at'])
-            detailed_data['analyzed_at'] = pd.to_datetime(detailed_data['analyzed_at'])
-            
-            # Create a container for key metrics
-            st.markdown("### 📊 Key Performance Indicators")
-            kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-            
-            with kpi_col1:
-                total_emails = len(detailed_data)
-                analyzed_emails = detailed_data['is_analyzed'].sum()
-                st.metric(
-                    "Email Analysis Coverage",
-                    f"{analyzed_emails}/{total_emails}",
-                    f"{((analyzed_emails/total_emails)*100):.1f}% analyzed"
-                )
-            
-            with kpi_col2:
-                high_severity = len(detailed_data[detailed_data['severity'] == 'High'])
-                st.metric(
-                    "High Severity Issues",
-                    high_severity,
-                    f"{((high_severity/total_emails)*100):.1f}% of total"
-                )
-            
-            with kpi_col3:
-                avg_response_time = (detailed_data['analyzed_at'] - detailed_data['created_at']).mean()
-                st.metric(
-                    "Avg. Analysis Time",
-                    f"{avg_response_time.total_seconds()/3600:.1f}h",
-                    "Time to analyze"
-                )
-            
-            with kpi_col4:
-                unique_incidents = detailed_data['incident_type'].nunique()
-                st.metric(
-                    "Unique Incident Types",
-                    unique_incidents,
-                    "Categories identified"
-                )
-            
-            # Create tabs for different analysis sections
-            analysis_tab1, analysis_tab2, analysis_tab3 = st.tabs([
-                "📈 Trends & Patterns",
-                "🔍 Incident Analysis",
-                "🤖 AI Insights"
-            ])
-            
-            with analysis_tab1:
-                st.markdown("### 📈 Temporal Analysis")
-                
-                # Time-based analysis
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    # Daily email volume
-                    daily_volume = detailed_data.set_index('created_at').resample('D').size()
-                    fig = px.line(
-                        daily_volume,
-                        title="Daily Email Volume",
-                        labels={'value': 'Number of Emails', 'created_at': 'Date'}
-                    )
-                    fig.update_layout(showlegend=False)
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    # Severity distribution over time
-                    severity_trend = pd.crosstab(
-                        detailed_data['created_at'].dt.date,
-                        detailed_data['severity']
-                    ).reset_index()
-                    
-                    # Ensure all severity levels exist in the DataFrame
-                    all_severities = ['High', 'Medium', 'Low']
-                    for severity in all_severities:
-                        if severity not in severity_trend.columns:
-                            severity_trend[severity] = 0
-                    
-                    # Melt the DataFrame with only the severity levels that exist in the data
-                    existing_severities = [col for col in all_severities if col in detailed_data['severity'].unique()]
-                    if not existing_severities:
-                        st.warning("No severity data available for visualization")
-                    else:
-                        severity_trend = pd.melt(
-                            severity_trend,
-                            id_vars=['created_at'],
-                            value_vars=existing_severities,
-                            var_name='Severity',
-                            value_name='Count'
-                        )
-                        fig = px.line(
-                            severity_trend,
-                            x='created_at',
-                            y='Count',
-                            color='Severity',
-                            title="Severity Trends Over Time"
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                
-                # Incident type analysis
-                st.markdown("### 🔍 Incident Type Analysis")
-                col3, col4 = st.columns(2)
-                
-                with col3:
-                    # Incident type distribution
-                    incident_counts = detailed_data['incident_type'].value_counts()
-                    fig = px.pie(
-                        values=incident_counts.values,
-                        names=incident_counts.index,
-                        title="Incident Type Distribution"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col4:
-                    # Severity by incident type
-                    severity_by_type = pd.crosstab(
-                        detailed_data['incident_type'],
-                        detailed_data['severity']
-                    )
-                    fig = px.bar(
-                        severity_by_type,
-                        title="Severity Distribution by Incident Type",
-                        barmode='group'
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-            
-            with analysis_tab2:
-                st.markdown("### 🔍 Detailed Incident Analysis")
-                
-                # Create filters
-                col1, col2 = st.columns(2)
-                with col1:
-                    selected_incident = st.selectbox(
-                        "Select Incident Type",
-                        options=['All'] + list(detailed_data['incident_type'].unique())
-                    )
-                with col2:
-                    selected_severity = st.selectbox(
-                        "Select Severity",
-                        options=['All'] + list(detailed_data['severity'].unique())
-                    )
-                
-                # Filter data based on selection
-                filtered_data = detailed_data.copy()
-                if selected_incident != 'All':
-                    filtered_data = filtered_data[filtered_data['incident_type'] == selected_incident]
-                if selected_severity != 'All':
-                    filtered_data = filtered_data[filtered_data['severity'] == selected_severity]
-                
-                # Display filtered metrics
-                col3, col4 = st.columns(2)
-                
-                with col3:
-                    # Time to analyze for filtered data
-                    if not filtered_data.empty and 'analyzed_at' in filtered_data.columns:
-                        avg_time = (filtered_data['analyzed_at'] - filtered_data['created_at']).mean()
-                        st.metric(
-                            "Average Analysis Time",
-                            f"{avg_time.total_seconds()/3600:.1f}h",
-                            "For selected filters"
-                        )
-                
-                with col4:
-                    # Analysis coverage for filtered data
-                    if not filtered_data.empty:
-                        coverage = (filtered_data['is_analyzed'].sum() / len(filtered_data)) * 100
-                        st.metric(
-                            "Analysis Coverage",
-                            f"{coverage:.1f}%",
-                            "For selected filters"
-                        )
-                
-                # Show detailed table
-                st.markdown("### 📋 Detailed Incident Data")
-                if not filtered_data.empty:
-                    display_data = filtered_data[[
-                        'id', 'email_subject', 'incident_type', 'severity',
-                        'created_at', 'is_analyzed', 'analyzed_at'
-                    ]].copy()
-                    display_data['created_at'] = display_data['created_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    display_data['analyzed_at'] = display_data['analyzed_at'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                    display_data['is_analyzed'] = display_data['is_analyzed'].map({True: '✅', False: '❌'})
-                    
-                    st.dataframe(
-                        display_data,
-                        use_container_width=True,
-                        column_config={
-                            "id": st.column_config.NumberColumn("ID", width="small"),
-                            "email_subject": st.column_config.TextColumn("Subject", width="large"),
-                            "incident_type": st.column_config.TextColumn("Incident Type", width="medium"),
-                            "severity": st.column_config.TextColumn("Severity", width="small"),
-                            "created_at": st.column_config.TextColumn("Created At", width="medium"),
-                            "is_analyzed": st.column_config.TextColumn("Analyzed", width="small"),
-                            "analyzed_at": st.column_config.TextColumn("Analyzed At", width="medium")
-                        }
-                    )
-                else:
-                    st.info("No data available for selected filters")
-            
-            with analysis_tab3:
-                st.markdown("### 🤖 AI-Powered Insights")
-                
-                # Generate insights using LLM
-                if st.button("Generate AI Insights"):
-                    with st.spinner("Analyzing data with AI..."):
-                        # Prepare context for LLM
-                        context = f"""
-                        Total Emails: {len(detailed_data)}
-                        Time Range: {detailed_data['created_at'].min().strftime('%Y-%m-%d')} to {detailed_data['created_at'].max().strftime('%Y-%m-%d')}
-                        
-                        Incident Type Distribution:
-                        {detailed_data['incident_type'].value_counts().to_dict()}
-                        
-                        Severity Distribution:
-                        {detailed_data['severity'].value_counts().to_dict()}
-                        
-                        Recent Procedural Deviations:
-                        {detailed_data['procedural_deviations'].dropna().iloc[:5].tolist()}
-                        
-                        Recent Recurrence Indicators:
-                        {detailed_data['recurrence_indicators'].dropna().iloc[:5].tolist()}
-                        
-                        Recent Systemic Trends:
-                        {detailed_data['systemic_trends'].dropna().iloc[:5].tolist()}
-                        """
-                        
-                        # Query LLM for insights
-                        insights_prompt = """Based on the email analysis data provided, generate a comprehensive analysis report with the following sections:
-                        1. Key Trends and Patterns
-                        2. Critical Issues and Risks
-                        3. Recommendations for Improvement
-                        4. Predictive Insights
-                        
-                        Focus on actionable insights and specific patterns in the data. Be concise but thorough."""
-                        
-                        try:
-                            insights = query_llm_with_context(insights_prompt, context, 'deepseek')
-                            st.markdown(insights)
-                        except Exception as e:
-                            st.error(f"Error generating AI insights: {str(e)}")
-                
-                # Show correlation analysis
-                st.markdown("### 📊 Correlation Analysis")
-                
-                # Calculate correlations between different metrics
-                if not detailed_data.empty:
-                    # Create correlation matrix for numerical features
-                    correlation_data = pd.DataFrame({
-                        'severity_high': (detailed_data['severity'] == 'High').astype(int),
-                        'severity_medium': (detailed_data['severity'] == 'Medium').astype(int),
-                        'severity_low': (detailed_data['severity'] == 'Low').astype(int),
-                        'analysis_time': (detailed_data['analyzed_at'] - detailed_data['created_at']).dt.total_seconds() / 3600,
-                        'is_analyzed': detailed_data['is_analyzed'].astype(int)
+        # Get trends over time
+        trends = get_trends_over_time()
+        if trends:
+            st.subheader("Incident Trends Over Time")
+            # Convert to DataFrame for easier plotting
+            trend_data = []
+            for bucket in trends:
+                date = bucket['key_as_string']
+                for incident in bucket['incident_types']['buckets']:
+                    trend_data.append({
+                        'date': date,
+                        'incident_type': incident['key'],
+                        'count': incident['doc_count']
                     })
-                    
-                    # Calculate correlation matrix
-                    corr_matrix = correlation_data.corr()
-                    
-                    # Plot correlation heatmap
-                    fig = px.imshow(
-                        corr_matrix,
-                        title="Metric Correlations",
-                        color_continuous_scale='RdBu',
-                        aspect='auto'
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Show key correlations
-                    st.markdown("#### Key Correlations")
-                    correlations = []
-                    for i in range(len(corr_matrix.columns)):
-                        for j in range(i+1, len(corr_matrix.columns)):
-                            correlations.append({
-                                'Metric 1': corr_matrix.columns[i],
-                                'Metric 2': corr_matrix.columns[j],
-                                'Correlation': corr_matrix.iloc[i,j]
-                            })
-                    
-                    corr_df = pd.DataFrame(correlations)
-                    corr_df = corr_df[abs(corr_df['Correlation']) > 0.1].sort_values('Correlation', ascending=False)
-                    st.dataframe(corr_df, use_container_width=True)
             
-        else:
-            st.warning("No email data found in the database.")
+            if trend_data:
+                df = pd.DataFrame(trend_data)
+                fig = px.line(
+                    df,
+                    x='date',
+                    y='count',
+                    color='incident_type',
+                    title="Incident Trends Over Time",
+                    labels={'date': 'Date', 'count': 'Number of Incidents'}
+                )
+                st.plotly_chart(fig)
+        
+        # Get incident correlations
+        correlations = get_incident_correlations()
+        if correlations:
+            st.subheader("Incident Type vs Severity Correlations")
+            # Convert to DataFrame for easier plotting
+            corr_data = []
+            for incident_type, severity_dist in correlations.items():
+                for severity, count in severity_dist.items():
+                    corr_data.append({
+                        'incident_type': incident_type,
+                        'severity': severity,
+                        'count': count
+                    })
             
+            if corr_data:
+                df = pd.DataFrame(corr_data)
+                fig = px.bar(
+                    df,
+                    x='incident_type',
+                    y='count',
+                    color='severity',
+                    title="Incident Type vs Severity Distribution",
+                    labels={'incident_type': 'Incident Type', 'count': 'Count', 'severity': 'Severity Level'}
+                )
+                st.plotly_chart(fig)
+        
+        # Get systemic trends
+        systemic_trends = get_systemic_trends()
+        if systemic_trends:
+            st.subheader("Systemic Trends Analysis")
+            
+            # Create a DataFrame for the trends
+            trend_data = []
+            for incident_type, data in systemic_trends.items():
+                trend_data.append({
+                    'incident_type': incident_type,
+                    'total_count': data['count'],
+                    'recent_count': data['recent_count'],
+                    'trend': 'Increasing' if data['recent_count'] > data['count'] / 4 else 'Stable'
+                })
+            
+            if trend_data:
+                df = pd.DataFrame(trend_data)
+                
+                # Display trend summary
+                st.write("### Trend Summary")
+                for _, row in df.iterrows():
+                    st.write(f"**{row['incident_type']}**:")
+                    st.write(f"- Total Incidents: {row['total_count']}")
+                    st.write(f"- Recent Incidents (Last 7 days): {row['recent_count']}")
+                    st.write(f"- Trend: {row['trend']}")
+                    st.write("---")
+                
+                # Plot trend comparison
+                fig = px.bar(
+                    df,
+                    x='incident_type',
+                    y=['total_count', 'recent_count'],
+                    title="Total vs Recent Incidents by Type",
+                    labels={'value': 'Count', 'variable': 'Time Period'},
+                    barmode='group'
+                )
+                st.plotly_chart(fig)
+        
+        # Detailed Analysis Section
+        st.subheader("Detailed Analysis")
+        
+        # Incident Type Details
+        selected_incident = st.selectbox(
+            "Select Incident Type for Details",
+            options=list(incident_dist.keys()) if incident_dist else []
+        )
+        
+        if selected_incident:
+            incidents = get_incident_details(selected_incident)
+            if incidents:
+                st.write(f"### Details for {selected_incident}")
+                for incident in incidents:
+                    with st.expander(f"{incident['subject']} ({incident['severity']})"):
+                        st.write(f"**Date:** {incident['created_at']}")
+                        st.write(f"**Summary:** {incident['summary']}")
+        
+        # Severity Level Details
+        selected_severity = st.selectbox(
+            "Select Severity Level for Details",
+            options=list(severity_dist.keys()) if severity_dist else []
+        )
+        
+        if selected_severity:
+            incidents = get_severity_details(selected_severity)
+            if incidents:
+                st.write(f"### Details for {selected_severity} Severity Incidents")
+                for incident in incidents:
+                    with st.expander(f"{incident['subject']} ({incident['incident_type']})"):
+                        st.write(f"**Date:** {incident['created_at']}")
+                        st.write(f"**Summary:** {incident['summary']}")
+        
     except Exception as e:
-        st.error(f"Error loading analytics: {str(e)}")
         logger.error(f"Error in analytics dashboard: {str(e)}")
+        st.error("An error occurred while loading the analytics dashboard. Please check the logs for details.")
 
 # Create three main columns for the original content
 with tab1:
