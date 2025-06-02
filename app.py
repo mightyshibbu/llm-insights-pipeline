@@ -1109,7 +1109,7 @@ def create_similarity_batches(emails, batch_size=10, similarity_threshold=0.7):
     return batches
 
 def process_batch(batch, batch_num, total_batches, model_name):
-    """Process a single batch of emails - Uses DeepSeek API directly"""
+    """Process a single batch of emails using DeepSeek as primary and Anthropic as fallback"""
     try:
         # Use a separate logger for thread operations to avoid Streamlit context issues
         thread_logger = logging.getLogger(f'thread_{batch_num}')
@@ -1155,20 +1155,14 @@ def process_batch(batch, batch_num, total_batches, model_name):
         5. Focus on the most critical issue or pattern
         6. Be specific but concise"""
 
-        # Use large model for complex analysis
-        model_config = select_model('complex_analysis')
-        # Reduce max tokens for analysis
-        model_config['max_tokens'] = min(model_config['max_tokens'], 1000)
-
-        # Use DeepSeek API directly for analysis
-        thread_logger.info("Using DeepSeek API for batch analysis")
-        response = get_deepseek_response(
+        # Use large model for complex analysis with DeepSeek as primary and Anthropic as fallback
+        thread_logger.info("Using DeepSeek as primary model with Anthropic fallback for batch analysis")
+        response = get_model_response(
             messages=[
                 {"role": "system", "content": "You are an expert at analyzing maintenance and service-related emails. You MUST follow the exact format specified in the prompt, including exactly 1 bullet point per section. Keep each bullet point to ONE sentence and focus on the most critical issue."},
                 {"role": "user", "content": prompt}
             ],
-            model_config=model_config,
-            model_name=model_name
+            model_size='large'  # Use large model for batch analysis
         )
         
         # Parse the response
@@ -1195,115 +1189,37 @@ def process_batch(batch, batch_num, total_batches, model_name):
         # Store analysis results for each email in the batch using a transaction
         thread_conn = None
         try:
+            # Create a new database connection for this thread
             thread_conn = duckdb.connect(DB_PATH)
             thread_conn.execute("BEGIN TRANSACTION")
             
+            # Update each email in the batch - using analyzed_at instead of analysis_timestamp
             for id, _, _ in batch:
-                # Map old section names to new ones for database storage
-                pd = section_map.get("PROCEDURAL DEVIATIONS", "") or ""
-                ri = section_map.get("RECURRENCE INDICATORS", "") or ""
-                st = section_map.get("SYSTEMIC TRENDS", "") or ""
-                
-                # Check if analysis already exists for this email
-                existing_analysis = thread_conn.execute('''
-                    SELECT id FROM email_analysis WHERE email_id = ?
-                ''', (id,)).fetchone()
-                
-                if existing_analysis:
-                    # Update existing analysis
-                    thread_conn.execute('''
-                        UPDATE email_analysis 
-                        SET procedural_deviations = ?,
-                            recurrence_indicators = ?,
-                            systemic_trends = ?,
-                            created_at = CURRENT_TIMESTAMP
-                        WHERE email_id = ?
-                    ''', (pd, ri, st, id))
-                    thread_logger.info(f"Updated analysis results for email {id}")
-                else:
-                    # Insert new analysis
-                    thread_conn.execute('''
-                        INSERT INTO email_analysis 
-                        (id, email_id, procedural_deviations, recurrence_indicators, systemic_trends)
-                        VALUES (
-                            (SELECT COALESCE(MAX(id), 0) + 1 FROM email_analysis),
-                            ?, ?, ?, ?
-                        )
-                    ''', (id, pd, ri, st))
-                    thread_logger.info(f"Stored new analysis results for email {id}")
-                
-                # Update is_analyzed flag and analyzed_at timestamp
                 thread_conn.execute('''
                     UPDATE emails 
-                    SET is_analyzed = TRUE, 
-                        analyzed_at = CURRENT_TIMESTAMP 
+                    SET is_analyzed = TRUE,
+                        analyzed_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                ''', (id,))
-                thread_logger.info(f"Updated analysis status for email {id}")
+                ''', [id])
             
-            # Commit the transaction
             thread_conn.execute("COMMIT")
             thread_logger.info(f"Successfully processed batch {batch_num}")
-            
-            # Update OpenSearch metadata for these emails
-            try:
-                # Get current metadata for these emails
-                results = opensearch_client.search(
-                    index=OPENSEARCH_INDEX_NAME,
-                    body={
-                        "query": {
-                            "bool": {
-                                "filter": {
-                                    "terms": {
-                                        "email_id": [id for id, _, _ in batch]
-                                    }
-                                }
-                            }
-                        },
-                        "fields": ["subject", "incident_type", "severity", "created_at", "created_at_timestamp", "is_analyzed", "summary", "summary_vector"]
-                    }
-                )
-                
-                # Update metadata with is_analyzed=True
-                for hit in results['hits']['hits']:
-                    hit['_source']['is_analyzed'] = True
-                
-                # Update OpenSearch
-                for id, subject, _, _, _, _, summary, summary_vector in batch:
-                    opensearch_client.index(
-                        index=OPENSEARCH_INDEX_NAME,
-                        body={  # Changed from 'document' to 'body'
-                            'subject': subject,
-                            'incident_type': analysis['incident_type'],
-                            'severity': analysis['severity'],
-                            'created_at': datetime.now().isoformat(),
-                            'created_at_timestamp': int(datetime.now().timestamp()),
-                            'is_analyzed': True,
-                            'summary': summary,
-                            'summary_vector': summary_vector
-                        },
-                        refresh=True
-                    )
-                thread_logger.info(f"Updated OpenSearch metadata for batch {batch_num}")
-            except Exception as e:
-                thread_logger.error(f"Error updating OpenSearch metadata: {str(e)}")
-                # Don't fail the whole batch if OpenSearch update fails
-
             return section_map
             
         except Exception as e:
-            if thread_conn is not None:
+            if thread_conn:
                 thread_conn.execute("ROLLBACK")
-            thread_logger.error(f"Error processing batch {batch_num}: {str(e)}")
+            thread_logger.error(f"Error storing batch {batch_num} results: {str(e)}")
             return None
         finally:
-            if thread_conn is not None:
+            if thread_conn:
                 try:
                     thread_conn.close()
                 except:
                     pass
+            
     except Exception as e:
-        thread_logger.error(f"Unexpected error in process_batch: {str(e)}")
+        thread_logger.error(f"Error processing batch {batch_num}: {str(e)}")
         return None
 
 def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=False, similarity_threshold=0.7):
@@ -1452,8 +1368,8 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
         'analysis_stats': analysis_stats
     }
 
-def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_quality=0.5):
-    """Get context from analyzed emails using permanent vector embeddings with hybrid category filtering"""
+def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_quality=0.5, st_session=None):
+    """Get context from analyzed emails using OpenSearch vector search and stored summaries"""
     try:
         # Calculate date threshold
         date_threshold = datetime.now() - timedelta(days=days_back)
@@ -1463,104 +1379,71 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
         if query_text:
             try:
                 logger.info(f"Processing query: '{query_text}'")
-                # Get recent emails first for fallback
-                conn = get_db_connection()
-                recent_emails = conn.execute('''
-                    SELECT id, email_subject, email_text_body, incident_type, severity
-                    FROM emails 
-                    WHERE created_at >= ?
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                ''', (date_threshold.isoformat(), limit * 2)).fetchall()
                 
-                if not recent_emails:
-                    logger.warning(f"No emails found in the last {days_back} days")
-                    return f"No emails found in the last {days_back} days.", 0
+                # Generate query embedding using the stored model
+                query_embedding = st.session_state.embedding_model.encode(
+                    query_text,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True
+                ).astype('float32')
                 
-                logger.info(f"Found {len(recent_emails)} recent emails for potential fallback")
+                # Ensure the embedding is a list of floats
+                query_vector = query_embedding.tolist()
+                logger.info(f"Generated query vector of length {len(query_vector)}")
                 
-                # Determine relevant categories for the query
-                relevant_categories = determine_relevant_categories(query_text)
-                logger.info(f"Relevant categories for query: {relevant_categories}")
-                
-                # Query OpenSearch for similar summaries
-                logger.info("Querying OpenSearch for similar summaries...")
-                results = opensearch_client.search(
-                    index=OPENSEARCH_INDEX_NAME,
-                    body={
-                        "query": {
-                            "bool": {
-                                "filter": {
-                                    "terms": {
-                                        "incident_type": relevant_categories,
-                                        "severity": relevant_categories
+                # Query OpenSearch using vector search
+                logger.info("Querying OpenSearch using vector search...")
+                query_body = {
+                    "query": {
+                        "bool": {
+                            "must": [
+                                {
+                                    "knn": {
+                                        "summary_vector": {
+                                            "vector": query_vector,  # Use the list version
+                                            "k": limit * 2
+                                        }
                                     }
                                 }
-                            }
-                        },
-                        "fields": ["subject", "incident_type", "severity", "created_at", "created_at_timestamp", "is_analyzed", "summary", "summary_vector"],
-                        "size": limit * 2  # Get more results than needed for filtering
-                    }
+                            ],
+                            "filter": [
+                                {
+                                    "range": {
+                                        "created_at_timestamp": {
+                                            "gte": date_threshold_timestamp
+                                        }
+                                    }
+                                }
+                            ]
+                        }
+                    },
+                    "fields": ["email_id", "subject", "incident_type", "severity", "created_at", "summary"],
+                    "size": limit * 2,
+                    "_source": True
+                }
+                
+                results = opensearch_client.search(
+                    index=OPENSEARCH_INDEX_NAME,
+                    body=query_body
                 )
                 
                 if not results['hits']['hits']:
-                    logger.warning("No results from vector search, falling back to text search")
-                    return get_fallback_context(recent_emails, query_text, limit, days_back)
+                    logger.warning("No results from vector search")
+                    return f"No relevant emails found in the last {days_back} days.", 0
                 
                 # Get email IDs from OpenSearch results
                 email_ids = [int(hit['_source']['email_id']) for hit in results['hits']['hits']]
-                
-                # If we have 1-2 specific categories, filter the results
-                if 1 <= len(relevant_categories) <= 2:
-                    logger.info(f"Filtering results for specific categories: {relevant_categories}")
-                    # Get analysis results for these emails
-                    category_filtered_ids = conn.execute('''
-                        SELECT DISTINCT email_id 
-                        FROM email_analysis 
-                        WHERE email_id IN ({})
-                        AND (
-                            CASE 
-                                WHEN ? IN ('procedural_deviations') AND procedural_deviations != '' THEN TRUE
-                                WHEN ? IN ('recurrence_indicators') AND recurrence_indicators != '' THEN TRUE
-                                WHEN ? IN ('systemic_trends') AND systemic_trends != '' THEN TRUE
-                                ELSE FALSE
-                            END
-                        )
-                    '''.format(','.join('?' * len(email_ids))), 
-                    [*email_ids, *relevant_categories, *relevant_categories, *relevant_categories]).fetchall()
-                    
-                    category_filtered_ids = [row[0] for row in category_filtered_ids]
-                    logger.info(f"Found {len(category_filtered_ids)} emails matching specific categories")
-                    
-                    if category_filtered_ids:
-                        # Filter OpenSearch results to only include category-matched emails
-                        filtered_indices = [i for i, hit in enumerate(results['hits']['hits']) if int(hit['_source']['email_id']) in category_filtered_ids]
-                        
-                        if filtered_indices:
-                            # Update results with filtered data
-                            results['hits']['hits'] = [results['hits']['hits'][i] for i in filtered_indices]
-                            logger.info(f"Filtered to {len(filtered_indices)} category-specific results")
-                        else:
-                            logger.info("No category-specific results found, using all results")
-                    else:
-                        logger.info("No category-specific matches found, using all results")
-                else:
-                    logger.info("Using all results (no specific category filtering)")
+                logger.info(f"Found {len(email_ids)} relevant emails from vector search")
                 
                 # Get full email details from DuckDB
-                email_ids = [int(hit['_source']['email_id']) for hit in results['hits']['hits']]
-                logger.info(f"Retrieving full details for {len(email_ids)} emails from DuckDB")
-                
-                # Get full email details
+                conn = get_db_connection()
                 emails = conn.execute('''
                     SELECT id, email_subject, email_text_body, incident_type, severity
                     FROM emails 
                     WHERE id IN ({})
                 '''.format(','.join('?' * len(email_ids))), email_ids).fetchall()
                 
-                logger.info(f"Retrieved {len(emails)} full email details from DuckDB")
-                
-                # Build context from results
+                # Build context from results using stored summaries
                 context_parts = []
                 total_chars = 0
                 used_emails = set()
@@ -1575,26 +1458,15 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                     if email_detail:
                         id, subject, body, inc_type, sev = email_detail
                         
-                        # Get category-specific analysis if available
-                        analysis = conn.execute('''
-                            SELECT procedural_deviations, recurrence_indicators, systemic_trends
-                            FROM email_analysis
-                            WHERE email_id = ?
-                        ''', (id,)).fetchone()
+                        # Use the stored summary from OpenSearch
+                        stored_summary = hit['_source']['summary']
+                        similarity_score = 1 - hit['_score']  # Convert distance to similarity
                         
-                        # Build category-specific summary if we have analysis
-                        category_summary = ""
-                        if analysis and 1 <= len(relevant_categories) <= 2:
-                            pd, ri, st = analysis
-                            if 'procedural_deviations' in relevant_categories and pd:
-                                category_summary += f"\nProcedural Deviations: {pd}"
-                            if 'recurrence_indicators' in relevant_categories and ri:
-                                category_summary += f"\nRecurrence Indicators: {ri}"
-                            if 'systemic_trends' in relevant_categories and st:
-                                category_summary += f"\nSystemic Trends: {st}"
-                        
-                        email_content = f"""Email {id} (Similarity: {1 - hit['_score']:.2f}):
-{hit['_source']['summary']}{category_summary}
+                        email_content = f"""Email {id} (Similarity: {similarity_score:.2f}):
+Subject: {subject}
+Incident Type: {inc_type}
+Severity: {sev}
+Summary: {stored_summary}
 Body Preview: {body[:200]}..."""
                         
                         email_size = len(email_content)
@@ -1607,8 +1479,6 @@ Body Preview: {body[:200]}..."""
                 # Build final context
                 context = f"Similar email summaries (showing {len(used_emails)} emails, {total_chars} chars)\n"
                 context += f"Query: {query_text}\n"
-                if 1 <= len(relevant_categories) <= 2:
-                    context += f"Focusing on categories: {', '.join(relevant_categories)}\n"
                 context += f"Analysis period: Last {days_back} days\n"
                 context += "\n".join(context_parts)
                 
@@ -1617,80 +1487,77 @@ Body Preview: {body[:200]}..."""
                 
             except Exception as e:
                 logger.error(f"Error in vector search: {str(e)}")
-                logger.info("Falling back to text search due to vector search error")
-                return get_fallback_context(recent_emails, query_text, limit, days_back)
+                return f"Error retrieving email context: {str(e)}", 0
         else:
-            # If no query text, get recent emails directly from DuckDB
+            # If no query text, get recent emails directly from OpenSearch
             logger.info("No query text provided, retrieving recent emails")
+            query_body = {
+                "query": {
+                    "bool": {
+                        "filter": [
+                            {
+                                "range": {
+                                    "created_at_timestamp": {
+                                        "gte": date_threshold_timestamp
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                },
+                "sort": [
+                    {"created_at_timestamp": {"order": "desc"}}
+                ],
+                "fields": ["email_id", "subject", "incident_type", "severity", "created_at", "summary"],
+                "size": limit,
+                "_source": True
+            }
+            
+            results = opensearch_client.search(
+                index=OPENSEARCH_INDEX_NAME,
+                body=query_body
+            )
+            
+            if not results['hits']['hits']:
+                logger.warning(f"No emails found in the last {days_back} days")
+                return f"No emails found in the last {days_back} days.", 0
+            
+            # Get email IDs and fetch full details from DuckDB
+            email_ids = [int(hit['_source']['email_id']) for hit in results['hits']['hits']]
             conn = get_db_connection()
             emails = conn.execute('''
                 SELECT id, email_subject, email_text_body, incident_type, severity
                 FROM emails 
-                WHERE created_at >= ?
-                ORDER BY created_at DESC
-                LIMIT ?
-            ''', (date_threshold.isoformat(), limit)).fetchall()
+                WHERE id IN ({})
+            '''.format(','.join('?' * len(email_ids))), email_ids).fetchall()
             
-            if not emails:
-                logger.warning(f"No emails found in the last {days_back} days")
-                return f"No emails found in the last {days_back} days.", 0
-            
-            logger.info(f"Retrieved {len(emails)} recent emails from DuckDB")
-            
-            # Get summaries from OpenSearch for these emails
-            try:
-                logger.info("Retrieving summaries from OpenSearch")
-                summaries = opensearch_client.search(
-                    index=OPENSEARCH_INDEX_NAME,
-                    body={
-                        "query": {
-                            "bool": {
-                                "filter": {
-                                    "terms": {
-                                        "email_id": [id for id, _, _ in emails]
-                                    }
-                                }
-                            }
-                        },
-                        "fields": ["subject", "incident_type", "severity", "created_at", "created_at_timestamp", "is_analyzed", "summary", "summary_vector"],
-                        "size": len(emails)
-                    }
-                )
-                summary_map = {int(hit['_source']['email_id']): hit['_source']['summary'] 
-                             for hit in summaries['hits']['hits']}
-                logger.info(f"Retrieved {len(summary_map)} summaries from OpenSearch")
-            except Exception as e:
-                logger.error(f"Error getting summaries from OpenSearch: {str(e)}")
-                summary_map = {}
-            
-            # Generate context with summaries
+            # Build context using stored summaries
             context_parts = []
             total_chars = 0
             
-            for id, subject, body, inc_type, sev in emails:
+            for hit in results['hits']['hits']:
+                email_id = int(hit['_source']['email_id'])
                 if total_chars >= MAX_CONTEXT_SIZE:
                     break
                 
-                # Use stored summary if available, otherwise generate new one
-                summary = summary_map.get(id)
-                if not summary:
-                    logger.info(f"Generating new summary for email {id}")
-                    summary = summarize_emails_bulk([(id, body, subject)], model_name)[id]
-                else:
-                    logger.info(f"Using stored summary for email {id}")
-                
-                email_content = f"""Email {id}:
+                # Find matching email details
+                email_detail = next((e for e in emails if e[0] == email_id), None)
+                if email_detail:
+                    id, subject, body, inc_type, sev = email_detail
+                    stored_summary = hit['_source']['summary']
+                    
+                    email_content = f"""Email {id}:
 Subject: {subject}
 Incident Type: {inc_type}
 Severity: {sev}
-Summary: {summary}
+Summary: {stored_summary}
 Body Preview: {body[:200]}..."""
-                
-                email_size = len(email_content)
-                if total_chars + email_size <= MAX_CONTEXT_SIZE:
-                    context_parts.append(email_content)
-                    total_chars += email_size
-                    logger.info(f"Added email {id} to context (size: {email_size} chars, total: {total_chars} chars)")
+                    
+                    email_size = len(email_content)
+                    if total_chars + email_size <= MAX_CONTEXT_SIZE:
+                        context_parts.append(email_content)
+                        total_chars += email_size
+                        logger.info(f"Added email {id} to context (size: {email_size} chars, total: {total_chars} chars)")
             
             # Build final context
             context = f"Recent email summaries (showing {len(context_parts)} emails, {total_chars} chars)\n"
@@ -1704,7 +1571,7 @@ Body Preview: {body[:200]}..."""
         logger.error(f"Error getting email context: {str(e)}")
         return "Error retrieving email context. Please check the logs for details.", 0
 
-def get_fallback_context(emails, query_text, limit, days_back):
+def get_fallback_context(emails, query_text, limit, days_back, model_name):
     """Fallback method using simple text similarity when vector search fails"""
     try:
         # Use TF-IDF for simple text similarity
@@ -1754,43 +1621,18 @@ Body Preview: {body[:200]}..."""
         logger.error(f"Error in fallback context generation: {str(e)}")
         return "Error generating context. Please try a different query.", 0
 
-def get_cached_query(query_text, context_size, model_name):
-    """Get cached query result if available and not expired"""
-    try:
-        conn = get_db_connection()
-        # Add cache expiration (24 hours)
-        cache_expiry = datetime.now() - timedelta(hours=24)
-        
-        result = conn.execute('''
-            SELECT response_text, created_at
-            FROM query_cache
-            WHERE query_text = ? 
-            AND context_size = ?
-            AND model_name = ?
-            AND created_at > ?
-            ORDER BY created_at DESC
-            LIMIT 1
-        ''', (query_text, context_size, model_name, cache_expiry)).fetchone()
-        
-        if result:
-            response_text, created_at = result
-            # Update the timestamp to refresh the cache
-            conn.execute('''
-                UPDATE query_cache
-                SET created_at = CURRENT_TIMESTAMP
-                WHERE query_text = ? AND context_size = ? AND model_name = ?
-            ''', (query_text, context_size, model_name))
-            return response_text
-    except Exception as e:
-        logger.error(f"Error retrieving cached query: {str(e)}")
-    return None
-
 def cache_query_result(query_text, response_text, context_size, model_name):
     """Cache query result with model information"""
     try:
         conn = get_db_connection()
         # Get the next available ID
         next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM query_cache").fetchone()[0]
+        
+        # Convert response to string if it's a ChatCompletion object
+        if hasattr(response_text, 'choices'):
+            response_text = response_text.choices[0].message.content
+        elif not isinstance(response_text, str):
+            response_text = str(response_text)
         
         # First delete any existing cache entry for this query to avoid duplicates
         conn.execute('''
@@ -1880,6 +1722,32 @@ def get_similar_emails(query_text, limit=5):
         logger.error(f"Error finding similar emails: {str(e)}")
         return []
 
+def get_cached_query(query_text, context_size, model_name):
+    """Get cached query result if available"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return None
+            
+        # Look for exact match in cache
+        result = conn.execute('''
+            SELECT response_text 
+            FROM query_cache 
+            WHERE query_text = ? 
+            AND context_size = ? 
+            AND model_name = ?
+            ORDER BY created_at DESC 
+            LIMIT 1
+        ''', (query_text, context_size, model_name)).fetchone()
+        
+        if result:
+            logger.info(f"Found cached response for query using model {model_name}")
+            return result[0]
+        return None
+    except Exception as e:
+        logger.error(f"Error checking query cache: {str(e)}")
+        return None
+
 def query_llm_with_context(query_text, context, model_name='groq'):
     """
     Query the LLM with email context using the specified model.
@@ -1917,7 +1785,8 @@ def query_llm_with_context(query_text, context, model_name='groq'):
             4. Keep responses concise but informative
             5. Focus on actionable insights and patterns
             6. If you notice any critical issues, highlight them
-            7. Format your response in clear, readable sections if appropriate"""},
+            7. Format your response in clear, readable sections if appropriate
+            8. For 'show all emails' queries, list each email with its ID, subject, incident type, and severity"""},
             {"role": "user", "content": f"""Context from analyzed emails:
             {context}
             
@@ -1931,15 +1800,20 @@ def query_llm_with_context(query_text, context, model_name='groq'):
         try:
             if model_name == 'groq' and groq_available:
                 response = get_groq_response(messages, model_config)
+                # Extract content from Groq response
+                if hasattr(response, 'choices') and len(response.choices) > 0:
+                    response_text = response.choices[0].message.content
+                else:
+                    response_text = str(response)
             else:  # deepseek
                 # Use the actual model name from session state for DeepSeek
                 actual_model_name = st.session_state.deepseek_model
                 logger.info(f"Using DeepSeek model: {actual_model_name}")
-                response = get_deepseek_response(messages, model_config, actual_model_name)
+                response_text = get_deepseek_response(messages, model_config, actual_model_name)
             
             # Cache the response
-            cache_query_result(query_text, response, len(context.split('\n')), model_name)
-            return response
+            cache_query_result(query_text, response_text, len(context.split('\n')), model_name)
+            return response_text
             
         except Exception as e:
             if model_name == 'groq':
@@ -1949,10 +1823,10 @@ def query_llm_with_context(query_text, context, model_name='groq'):
                 try:
                     actual_model_name = st.session_state.deepseek_model
                     logger.info(f"Using DeepSeek fallback model: {actual_model_name}")
-                    response = get_deepseek_response(messages, model_config, actual_model_name)
+                    response_text = get_deepseek_response(messages, model_config, actual_model_name)
                     # Cache the response with the fallback model
-                    cache_query_result(query_text, response, len(context.split('\n')), 'deepseek')
-                    return response
+                    cache_query_result(query_text, response_text, len(context.split('\n')), 'deepseek')
+                    return response_text
                 except Exception as fallback_error:
                     logger.error(f"Fallback to DeepSeek also failed: {str(fallback_error)}")
                     raise
@@ -2765,32 +2639,65 @@ def get_severity_details(severity):
 
 # Add after the model configurations and before the analysis functions
 def get_model_response(messages, model_size='small'):
-    """Get response from the configured model provider with fallback"""
+    """Get response from the configured model provider with DeepSeek as primary and Anthropic as fallback"""
     try:
-        # For summarization, use Anthropic
-        model_config = ANALYSIS_MODEL_CONFIG[model_size]['anthropic'].copy()  # Make a copy to avoid modifying the original
-        # Ensure max_tokens is set and within limits
-        if 'max_tokens' not in model_config or not isinstance(model_config['max_tokens'], int):
-            model_config['max_tokens'] = 1024 if model_size == 'small' else 2048  # Conservative defaults
-        # Cap max_tokens to ensure we don't exceed limits
-        model_config['max_tokens'] = min(model_config['max_tokens'], 2048)  # Hard cap at 2048
-        logger.info(f"Using Anthropic model for {model_size} task with max_tokens={model_config['max_tokens']}")
-        try:
-            return get_anthropic_response(messages, model_config)
-        except Exception as primary_error:
-            logger.error(f"Anthropic model failed: {str(primary_error)}")
-            # Fallback to DeepSeek or Groq as before
-            fallback_provider = 'deepseek' if MODEL_PROVIDER == 'groq' else 'groq'
+        # Initialize DeepSeek model in session state if not present
+        if 'deepseek_model' not in st.session_state:
             try:
-                fallback_config = ANALYSIS_MODEL_CONFIG[model_size][fallback_provider].copy()  # Make a copy
-                # Ensure fallback config also has conservative token limits
-                fallback_config['max_tokens'] = min(fallback_config['max_tokens'], 2048)
-                if fallback_provider == 'groq':
-                    return get_groq_response(messages, fallback_config)
+                available_models = get_available_deepseek_models()
+                if available_models:
+                    st.session_state.deepseek_model = available_models[0]
+                    logger.info(f"Initialized DeepSeek model to: {st.session_state.deepseek_model}")
                 else:
-                    return get_deepseek_response(messages, fallback_config, fallback_config['name'])
-            except Exception as fallback_error:
-                raise Exception(f"Both Anthropic and {fallback_provider} failed. Last error: {str(fallback_error)}")
+                    st.session_state.deepseek_model = DEEPSEEK_MODEL
+                    logger.info(f"No available DeepSeek models found, using default: {DEEPSEEK_MODEL}")
+            except Exception as e:
+                logger.error(f"Error initializing DeepSeek model: {str(e)}")
+                st.session_state.deepseek_model = DEEPSEEK_MODEL
+                logger.info(f"Using default DeepSeek model: {DEEPSEEK_MODEL}")
+
+        # For email analysis, try DeepSeek first
+        try:
+            # Get DeepSeek config
+            deepseek_config = ANALYSIS_MODEL_CONFIG[model_size]['deepseek'].copy()
+            # Ensure max_tokens is set and within limits
+            if 'max_tokens' not in deepseek_config or not isinstance(deepseek_config['max_tokens'], int):
+                deepseek_config['max_tokens'] = 1024 if model_size == 'small' else 2048
+            # Cap max_tokens to ensure we don't exceed limits
+            deepseek_config['max_tokens'] = min(deepseek_config['max_tokens'], 2048)
+            
+            logger.info(f"Attempting to use DeepSeek model for {model_size} task with max_tokens={deepseek_config['max_tokens']}")
+            actual_model_name = st.session_state.deepseek_model
+            return get_deepseek_response(messages, deepseek_config, actual_model_name)
+            
+        except Exception as deepseek_error:
+            logger.error(f"DeepSeek model failed: {str(deepseek_error)}")
+            # Fallback to Anthropic
+            try:
+                # Get Anthropic config
+                anthropic_config = ANALYSIS_MODEL_CONFIG[model_size]['anthropic'].copy()
+                # Ensure max_tokens is set and within limits
+                if 'max_tokens' not in anthropic_config or not isinstance(anthropic_config['max_tokens'], int):
+                    anthropic_config['max_tokens'] = 1024 if model_size == 'small' else 2048
+                anthropic_config['max_tokens'] = min(anthropic_config['max_tokens'], 2048)
+                
+                # Ensure all required fields are present
+                required_fields = ['name', 'max_tokens', 'temperature']
+                for field in required_fields:
+                    if field not in anthropic_config:
+                        if field == 'name':
+                            anthropic_config[field] = ANTHROPIC_MODEL
+                        elif field == 'temperature':
+                            anthropic_config[field] = 0.2
+                        elif field == 'max_tokens':
+                            anthropic_config[field] = 1024 if model_size == 'small' else 2048
+                
+                logger.info(f"Falling back to Anthropic model for {model_size} task with max_tokens={anthropic_config['max_tokens']}")
+                return get_anthropic_response(messages, anthropic_config)
+                
+            except Exception as anthropic_error:
+                raise Exception(f"Both DeepSeek and Anthropic failed. DeepSeek error: {str(deepseek_error)}, Anthropic error: {str(anthropic_error)}")
+                
     except Exception as e:
         logger.error(f"Error in get_model_response: {str(e)}")
         raise
@@ -3217,8 +3124,8 @@ with tab1:
             if st.button('🔍 Analyze Emails', use_container_width=True):
                 if query:
                     with st.spinner(f'Analyzing emails using {model_choice}...'):
-                        # Get context from analyzed emails
-                        context, num_emails = get_email_context(context_size, query, days_back=days_back)
+                        # Get context from analyzed emails - pass st.session_state
+                        context, num_emails = get_email_context(context_size, query, days_back=days_back, st_session=st.session_state)
                         
                         # Show context information in an expander
                         with st.expander("Context Information", expanded=False):
@@ -3259,7 +3166,20 @@ with tab1:
                 st.markdown(f"_{st.session_state['last_query']['query']}_")
                 
                 st.markdown("#### Response")
-                st.markdown(st.session_state['last_query']['response'])
+                # Ensure we're displaying the actual response text, not the object
+                response_text = st.session_state['last_query']['response']
+                if isinstance(response_text, str):
+                    st.markdown(response_text)
+                else:
+                    # Handle case where response might be an object
+                    try:
+                        if hasattr(response_text, 'choices') and len(response_text.choices) > 0:
+                            st.markdown(response_text.choices[0].message.content)
+                        else:
+                            st.markdown(str(response_text))
+                    except Exception as e:
+                        logger.error(f"Error formatting response: {str(e)}")
+                        st.markdown("Error displaying response. Please try again.")
 
     # Footer with metrics - make it more compact
     st.markdown("---")
