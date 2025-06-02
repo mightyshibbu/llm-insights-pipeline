@@ -450,38 +450,14 @@ def get_available_deepseek_models():
         logger.error(f"Error fetching DeepSeek models: {str(e)}")
         return []
 
-# Initialize database connection only once
-if 'db_initialized' not in st.session_state:
-    # Force reinitialize database to ensure correct schema
+def init_database():
+    """Initialize database with tables if they don't exist"""
     try:
-        # First, try to delete the database file if it exists
-        if os.path.exists(DB_PATH):
-            try:
-                # Close any existing connections
-                if 'conn' in st.session_state and st.session_state.conn is not None:
-                    try:
-                        st.session_state.conn.close()
-                    except:
-                        pass
-                    st.session_state.conn = None
-                
-                # Small delay to ensure connections are closed
-                time.sleep(0.5)
-                
-                # Delete the database file
-                os.remove(DB_PATH)
-                logger.info(f"Deleted existing database file {DB_PATH}")
-            except Exception as e:
-                logger.error(f"Error deleting database file: {str(e)}")
-                st.error("Failed to initialize database. Please check the logs for details.")
-                st.stop()
-        
-        # Create a new connection with a fresh database
         conn = duckdb.connect(DB_PATH)
         
-        # Create tables with correct schema
+        # Create tables if they don't exist
         conn.execute("""
-            CREATE TABLE emails (
+            CREATE TABLE IF NOT EXISTS emails (
                 id BIGINT PRIMARY KEY,
                 email_subject TEXT,
                 email_text_body TEXT,
@@ -498,7 +474,7 @@ if 'db_initialized' not in st.session_state:
         """)
 
         conn.execute("""
-            CREATE TABLE email_analysis (
+            CREATE TABLE IF NOT EXISTS email_analysis (
                 id BIGINT PRIMARY KEY,
                 email_id BIGINT,
                 procedural_deviations TEXT,
@@ -510,7 +486,7 @@ if 'db_initialized' not in st.session_state:
         """)
 
         conn.execute("""
-            CREATE TABLE query_cache (
+            CREATE TABLE IF NOT EXISTS query_cache (
                 id BIGINT PRIMARY KEY,
                 query_text TEXT,
                 response_text TEXT,
@@ -521,12 +497,47 @@ if 'db_initialized' not in st.session_state:
             )
         """)
         
-        st.session_state.conn = conn
-        st.session_state.db_initialized = True
-        logger.info("Database initialized with correct schema")
+        # Add table for storing insights
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS insights (
+                id BIGINT PRIMARY KEY,
+                procedural_deviations TEXT,
+                recurrence_indicators TEXT,
+                systemic_trends TEXT,
+                analysis_stats JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                is_active BOOLEAN DEFAULT TRUE
+            )
+        """)
+        
+        logger.info("Database tables verified/created successfully")
+        return conn
     except Exception as e:
         logger.error(f"Error initializing database: {str(e)}")
-        st.error("Failed to initialize database. Please check the logs for details.")
+        return None
+
+# Modify the database initialization in the main code
+if 'db_initialized' not in st.session_state:
+    try:
+        # Only initialize if database doesn't exist
+        if not os.path.exists(DB_PATH):
+            logger.info("Database file not found, creating new database")
+            conn = init_database()
+            if conn is None:
+                logger.error("Failed to initialize database")
+                st.error("Failed to initialize database. Please check the logs for details.")
+                st.stop()
+        else:
+            # Connect to existing database
+            logger.info("Connecting to existing database")
+            conn = duckdb.connect(DB_PATH)
+        
+        st.session_state.conn = conn
+        st.session_state.db_initialized = True
+        logger.info("Database connection established")
+    except Exception as e:
+        logger.error(f"Error connecting to database: {str(e)}")
+        st.error("Failed to connect to database. Please check the logs for details.")
         st.stop()
 
 # Initialize clients only once using session state
@@ -1367,6 +1378,93 @@ def get_insights(include_analyzed=False, batch_size=10, use_similarity_batching=
         'email_count': len(all_emails),
         'analysis_stats': analysis_stats
     }
+
+def store_insights(insights_data):
+    """Store insights in the database"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        # Get the next available ID
+        next_id = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM insights").fetchone()[0]
+        
+        # Convert analysis_stats to JSON string
+        analysis_stats_json = json.dumps(insights_data['analysis_stats'])
+        
+        # Store the insights
+        conn.execute('''
+            INSERT INTO insights (
+                id, procedural_deviations, recurrence_indicators, 
+                systemic_trends, analysis_stats, created_at, is_active
+            ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, TRUE)
+        ''', (
+            next_id,
+            insights_data['procedural_deviations'],
+            insights_data['recurrence_indicators'],
+            insights_data['systemic_trends'],
+            analysis_stats_json
+        ))
+        
+        # Deactivate all other insights
+        conn.execute('''
+            UPDATE insights 
+            SET is_active = FALSE 
+            WHERE id != ?
+        ''', [next_id])
+        
+        logger.info(f"Stored new insights with ID {next_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error storing insights: {str(e)}")
+        return False
+
+def get_latest_insights():
+    """Get the latest active insights from the database"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return None
+            
+        result = conn.execute('''
+            SELECT 
+                procedural_deviations,
+                recurrence_indicators,
+                systemic_trends,
+                analysis_stats,
+                created_at
+            FROM insights 
+            WHERE is_active = TRUE 
+            ORDER BY created_at DESC 
+            LIMIT 1
+        ''').fetchone()
+        
+        if result:
+            return {
+                'procedural_deviations': result[0],
+                'recurrence_indicators': result[1],
+                'systemic_trends': result[2],
+                'analysis_stats': json.loads(result[3]),
+                'last_updated': result[4].strftime('%Y-%m-%d %H:%M:%S')
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Error getting latest insights: {str(e)}")
+        return None
+
+def clear_insights():
+    """Clear all insights from the database"""
+    try:
+        conn = get_db_connection()
+        if conn is None:
+            return False
+            
+        conn.execute('DELETE FROM insights')
+        logger.info("Cleared all insights from database")
+        return True
+    except Exception as e:
+        logger.error(f"Error clearing insights: {str(e)}")
+        return False
 
 def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_quality=0.5, st_session=None):
     """Get context from analyzed emails using OpenSearch vector search and stored summaries"""
@@ -2943,8 +3041,12 @@ with tab1:
                     use_similarity_batching=use_similarity,
                     similarity_threshold=similarity_threshold
                 )
-                st.session_state['insights'] = insights
-                logger.info("Insights updated in session state")
+                # Store insights in database
+                if store_insights(insights):
+                    st.session_state['insights'] = insights
+                    logger.info("Insights updated and stored in database")
+                else:
+                    st.error("Failed to store insights in database")
 
         if 'insights' in st.session_state:
             st.markdown(f"**Last Updated:** {st.session_state['insights']['last_updated']}")
@@ -3323,4 +3425,14 @@ with status_col4:
             # Show Groq model
             st.markdown("**Groq Model:**")
             st.markdown(f"- {GROQ_MODEL}")
+
+# Add a clear insights button
+if st.button('Clear Insights', type='secondary'):
+    if clear_insights():
+        if 'insights' in st.session_state:
+            del st.session_state['insights']
+        st.success('Insights cleared successfully')
+        st.rerun()
+    else:
+        st.error('Failed to clear insights')
 
