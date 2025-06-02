@@ -1030,6 +1030,7 @@ def store_email(email_data):
 def store_multiple_emails(emails_data):
     """Store multiple emails in database"""
     logger.info(f"Starting batch import of {len(emails_data)} emails")
+    logger.info(f"First email details - Subject: {emails_data[0]['Email']['Subject']}, From: {emails_data[0]['Email']['From']}")
     success_count = 0
     error_count = 0
     error_messages = []
@@ -1204,14 +1205,116 @@ def process_batch(batch, batch_num, total_batches, model_name):
             thread_conn = duckdb.connect(DB_PATH)
             thread_conn.execute("BEGIN TRANSACTION")
             
-            # Update each email in the batch - using analyzed_at instead of analysis_timestamp
+            # Store analysis results for each email in the batch
             for id, _, _ in batch:
+                # Get the analysis for this email from the section map
+                procedural_deviations = section_map.get("PROCEDURAL DEVIATIONS", "")
+                recurrence_indicators = section_map.get("RECURRENCE INDICATORS", "")
+                systemic_trends = section_map.get("SYSTEMIC TRENDS", "")
+                
+                # Get next available ID for email_analysis
+                next_id = thread_conn.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM email_analysis").fetchone()[0]
+                
+                # Insert analysis results into database
+                thread_conn.execute('''
+                    INSERT INTO email_analysis (
+                        id, email_id, procedural_deviations, 
+                        recurrence_indicators, systemic_trends, created_at
+                    ) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (next_id, id, procedural_deviations, recurrence_indicators, systemic_trends))
+                
+                # Update email status in database
                 thread_conn.execute('''
                     UPDATE emails 
                     SET is_analyzed = TRUE,
                         analyzed_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                 ''', [id])
+
+                # Update OpenSearch document with analysis results
+                try:
+                    # Get email details from the batch
+                    email_detail = next((e for e in batch if e[0] == id), None)
+                    if email_detail:
+                        # Fix: Properly unpack the email details
+                        id, text_body, subject = email_detail  # Changed from 5 values to 3
+                        
+                        # Get incident type and severity from database
+                        conn = get_db_connection()
+                        email_info = conn.execute('''
+                            SELECT incident_type, severity 
+                            FROM emails 
+                            WHERE id = ?
+                        ''', [id]).fetchone()
+                        
+                        if email_info:
+                            inc_type, sev = email_info
+                            
+                            # Prepare the document data
+                            doc_data = {
+                                'email_id': id,
+                                'subject': subject,
+                                'incident_type': inc_type,
+                                'severity': sev,
+                                'created_at': datetime.now().isoformat(),
+                                'created_at_timestamp': int(datetime.now().timestamp()),
+                                'is_analyzed': True,
+                                'summary': summaries.get(id, ''),
+                                'analysis': {
+                                    'procedural_deviations': procedural_deviations,
+                                    'recurrence_indicators': recurrence_indicators,
+                                    'systemic_trends': systemic_trends,
+                                    'analyzed_at': datetime.now().isoformat()
+                                }
+                            }
+
+                            # Check if document exists
+                            try:
+                                exists = opensearch_client.exists(
+                                    index=OPENSEARCH_INDEX_NAME,
+                                    id=str(id)
+                                )
+                                
+                                if exists:
+                                    # Update existing document
+                                    opensearch_client.update(
+                                        index=OPENSEARCH_INDEX_NAME,
+                                        id=str(id),
+                                        body={
+                                            "doc": doc_data
+                                        },
+                                        refresh=True
+                                    )
+                                else:
+                                    # Create new document
+                                    opensearch_client.index(
+                                        index=OPENSEARCH_INDEX_NAME,
+                                        id=str(id),
+                                        body=doc_data,
+                                        refresh=True
+                                    )
+                                thread_logger.info(f"Updated/created document in OpenSearch for email {id}")
+                            except Exception as e:
+                                thread_logger.error(f"Error checking/updating OpenSearch for email {id}: {str(e)}")
+                                # Try to create document as fallback
+                                try:
+                                    opensearch_client.index(
+                                        index=OPENSEARCH_INDEX_NAME,
+                                        id=str(id),
+                                        body=doc_data,
+                                        refresh=True
+                                    )
+                                    thread_logger.info(f"Created new document in OpenSearch for email {id} (fallback)")
+                                except Exception as index_error:
+                                    thread_logger.error(f"Fallback document creation also failed for email {id}: {str(index_error)}")
+                                    # Continue with other emails even if one fails
+                        else:
+                            thread_logger.error(f"Could not find email details for ID {id} in batch")
+                    else:
+                        thread_logger.error(f"Could not find email details for ID {id} in batch")
+                except Exception as e:
+                    thread_logger.error(f"Error preparing OpenSearch update for email {id}: {str(e)}")
+                    # Continue with other emails even if one fails
             
             thread_conn.execute("COMMIT")
             thread_logger.info(f"Successfully processed batch {batch_num}")
@@ -1493,26 +1596,18 @@ def get_email_context(limit=10, query_text=None, days_back=30, min_analysis_qual
                 logger.info("Querying OpenSearch using vector search...")
                 query_body = {
                     "query": {
-                        "bool": {
-                            "must": [
-                                {
-                                    "knn": {
-                                        "summary_vector": {
-                                            "vector": query_vector,  # Use the list version
-                                            "k": limit * 2
-                                        }
-                                    }
-                                }
-                            ],
-                            "filter": [
-                                {
-                                    "range": {
-                                        "created_at_timestamp": {
-                                            "gte": date_threshold_timestamp
-                                        }
-                                    }
-                                }
-                            ]
+                        "knn": {
+                            "summary_vector": {
+                                "vector": query_vector,
+                                "k": limit * 2
+                            }
+                        }
+                    },
+                    "post_filter": {
+                        "range": {
+                            "created_at_timestamp": {
+                                "gte": date_threshold_timestamp
+                            }
                         }
                     },
                     "fields": ["email_id", "subject", "incident_type", "severity", "created_at", "summary"],
@@ -3062,14 +3157,15 @@ with tab1:
             - Batching Method: {stats.get('batching_method', 'N/A')}
             """)
             
-            with st.expander("Procedural Deviations", expanded=True):
-                st.write(st.session_state['insights']['procedural_deviations'])
+            # Remove the three expandable sections
+            # with st.expander("Procedural Deviations", expanded=True):
+            #     st.write(st.session_state['insights']['procedural_deviations'])
             
-            with st.expander("Recurrence Indicators", expanded=True):
-                st.write(st.session_state['insights']['recurrence_indicators'])
+            # with st.expander("Recurrence Indicators", expanded=True):
+            #     st.write(st.session_state['insights']['recurrence_indicators'])
             
-            with st.expander("Systemic Trends", expanded=True):
-                st.write(st.session_state['insights']['systemic_trends'])
+            # with st.expander("Systemic Trends", expanded=True):
+            #     st.write(st.session_state['insights']['systemic_trends'])
 
     # Middle Column - Data Management
     with col2:
